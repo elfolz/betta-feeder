@@ -440,8 +440,8 @@ async function enablePushNotifications() {
 	if (!messageListenerRegistered) {
 		messageListenerRegistered = true
 		fbMessaging.onMessage(async payload => {
-			const title = payload.notification?.title || 'BettaFeeder'
-			const message = payload.notification?.body || 'Nova notificação'
+			const title = payload.notification?.title || payload.data?.title || 'BettaFeeder'
+			const message = payload.notification?.body || payload.data?.body || 'Nova notificação'
 			log(`${title}: ${message}`, 'success')
 			toast(message)
 			await showNativeNotification(title, message)

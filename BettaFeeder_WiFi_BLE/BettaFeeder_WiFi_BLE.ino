@@ -524,9 +524,12 @@ bool deliverPush(const String& title, const String& body) {
   }
   http.addHeader("Authorization", "Bearer " + token);
   http.addHeader("Content-Type", "application/json; charset=utf-8");
+  // Mensagem data-only: o Service Worker controla explicitamente a exibicao
+  // mesmo quando a aba do PWA estiver fechada.
   String payload = "{\"message\":{\"token\":\"" + jsonEscape(fcmTargetToken) +
-            "\",\"notification\":{\"title\":\"" + jsonEscape(title) +
-            "\",\"body\":\"" + jsonEscape(body) + "\"}}}";
+            "\",\"data\":{\"title\":\"" + jsonEscape(title) +
+            "\",\"body\":\"" + jsonEscape(body) +
+            "\"},\"webpush\":{\"headers\":{\"Urgency\":\"high\"}}}}";
   int code = http.POST(payload);
   String response = (code > 0) ? http.getString() : "";
   bool retryWithoutCa = !tlsLowMemory && code < 0 && isTlsMemoryError(secure);
