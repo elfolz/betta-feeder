@@ -8,6 +8,18 @@ const BLE = {
 const $ = (id) => document.getElementById(id)
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
+try {
+	$('ssid').value = localStorage.getItem('bettafeeder.ssid') || ''
+	const savedFeedTimes = JSON.parse(localStorage.getItem('bettafeeder.feedTimes') || 'null')
+	if (/^\d{2}:\d{2}$/.test(savedFeedTimes?.feed1 || '')) $('feed1').value = savedFeedTimes.feed1
+	if (/^\d{2}:\d{2}$/.test(savedFeedTimes?.feed2 || '')) $('feed2').value = savedFeedTimes.feed2
+} catch (_) { }
+
+function saveFeedTimes(first, second) {
+	try {
+		localStorage.setItem('bettafeeder.feedTimes', JSON.stringify({ feed1: first, feed2: second }))
+	} catch (_) { }
+}
 let device = null
 let server = null
 let rxCharacteristic = null
@@ -107,10 +119,14 @@ function setConnected(connected, name = 'BettaFeeder') {
 	['saveTimesButton', 'saveWifiButton', 'statusButton', 'testFeedButton', 'homeButton', 'reloadButton'].forEach(id => $(id).disabled = !connected)
 	$('pushEnable').disabled = !connected
 	$('pushTest').disabled = !(connected && Boolean(currentFcmToken))
-	$('connectButton').querySelector('.connect-button-label').textContent = connected ? 'Desconectar' : 'Conectar'
-	$('serialConnectButton').querySelector('.serial-button-label').textContent = connectionMode === 'serial' && connected
+	const bluetoothButton = $('connectButton')
+	const serialButton = $('serialConnectButton')
+	bluetoothButton.querySelector('.connect-button-label').textContent = connected ? 'Desconectar' : 'Conectar'
+	serialButton.querySelector('.serial-button-label').textContent = connectionMode === 'serial' && connected
 		? 'Desconectar Serial'
 		: 'Conectar via USB Serial'
+	bluetoothButton.classList.toggle('button-danger', connected && connectionMode !== 'serial')
+	serialButton.classList.toggle('button-danger', connected && connectionMode === 'serial')
 	updatePushControl()
 }
 
@@ -122,6 +138,7 @@ function setConnectionLoading(loading) {
 	button.querySelector('.connect-button-label').textContent = loading
 		? 'Conectando...'
 		: (device?.gatt?.connected ? 'Desconectar' : 'Conectar')
+	button.classList.toggle('button-danger', !loading && Boolean(device?.gatt?.connected))
 }
 
 function parseDeviceMessage(message) {
@@ -133,7 +150,11 @@ function parseDeviceMessage(message) {
 		return i < 0 ? [part, ''] : [part.slice(0, i), part.slice(i + 1)]
 	}))
 	$('wifiStatus').textContent = fields.wifi || '—'
-	$('clockStatus').textContent = fields.hora && fields.data ? `${fields.hora} · ${fields.data}` : (fields.hora || '—')
+	const dateMatch = fields.data?.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+	const arduinoDate = dateMatch
+		? `${dateMatch[3]}/${dateMatch[2]}/${dateMatch[1]}`
+		: fields.data
+	$('clockStatus').textContent = fields.hora && arduinoDate ? `${fields.hora} · ${arduinoDate}` : (fields.hora || '—')
 	$('positionStatus').textContent = fields.posicao || '—'
 	$('portionsStatus').textContent = fields.porcoes_lote || '—'
 	$('batchStatus').textContent = `${fields.lote || '—'} · referência: ${fields.referencia || '—'}`
@@ -142,6 +163,9 @@ function parseDeviceMessage(message) {
 	$('testFeedButton').disabled = !(isConnected() && ready)
 	if (fields.feed1) $('feed1').value = fields.feed1
 	if (fields.feed2) $('feed2').value = fields.feed2
+	if (fields.feed1 || fields.feed2) {
+		saveFeedTimes(fields.feed1 || $('feed1').value, fields.feed2 || $('feed2').value)
+	}
 }
 
 function onNotification(event) {
@@ -394,6 +418,7 @@ $('saveTimesButton').addEventListener('click', () => guarded(async () => {
 	await sendCommand(`FEED1=${first}`)
 	await new Promise(resolve => setTimeout(resolve, 180))
 	await sendCommand(`FEED2=${second}`)
+	saveFeedTimes(first, second)
 	toast('Horários enviados ao Arduino')
 }))
 
@@ -407,6 +432,7 @@ $('wifiForm').addEventListener('submit', event => guarded(async () => {
 	await sendCommand(`SSID=${ssid}`)
 	await new Promise(resolve => setTimeout(resolve, 250))
 	await sendCommand(`PASS=${password}`)
+	try { localStorage.setItem('bettafeeder.ssid', ssid) } catch (_) { }
 	$('password').value = ''
 	toast('Dados do Wi-Fi enviados')
 }))
@@ -528,9 +554,12 @@ $('pushTest').classList.toggle('hidden', !pushTestMode)
 function updatePushControl() {
 	const permissionGranted = 'Notification' in window && Notification.permission === 'granted'
 	const enableButton = $('pushEnable')
-	enableButton.textContent = permissionGranted ? 'Desativar notificações e remover a permissão' : 'Ativar notificações'
+	const loading = enableButton.classList.contains('is-loading')
+	enableButton.querySelector('.push-button-label').textContent = loading
+		? 'Aguardando permissão...'
+		: (permissionGranted ? 'Desativar notificações e remover a permissão' : 'Ativar notificações')
 	enableButton.classList.toggle('button-danger', permissionGranted)
-	enableButton.disabled = !isConnected()
+	enableButton.disabled = loading || !isConnected()
 	$('pushTest').classList.toggle('hidden', !pushTestMode)
 }
 
@@ -543,11 +572,25 @@ async function disablePushNotifications() {
 	updatePushControl()
 }
 
-$('pushEnable').addEventListener('click', () => guarded(async () => {
-	if ('Notification' in window && Notification.permission === 'granted') await disablePushNotifications()
-	else await enablePushNotifications()
-	updatePushControl()
-}))
+$('pushEnable').addEventListener('click', async () => {
+	const enableButton = $('pushEnable')
+	const requestingPermission = !('Notification' in window) || Notification.permission !== 'granted'
+	if (requestingPermission) {
+		enableButton.classList.add('is-loading')
+		enableButton.setAttribute('aria-busy', 'true')
+		updatePushControl()
+	}
+	try {
+		await guarded(async () => {
+			if ('Notification' in window && Notification.permission === 'granted') await disablePushNotifications()
+			else await enablePushNotifications()
+		})
+	} finally {
+		enableButton.classList.remove('is-loading')
+		enableButton.removeAttribute('aria-busy')
+		updatePushControl()
+	}
+})
 
 updatePushControl()
 if (typeof navigator.permissions?.query === 'function') {
