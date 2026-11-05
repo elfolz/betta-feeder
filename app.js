@@ -111,7 +111,7 @@ function setConnected(connected, name = 'BettaFeeder') {
 	$('serialConnectButton').querySelector('.serial-button-label').textContent = connectionMode === 'serial' && connected
 		? 'Desconectar Serial'
 		: 'Conectar via USB Serial'
-	updatePushPermissionBanner()
+	updatePushControl()
 }
 
 function setConnectionLoading(loading) {
@@ -474,7 +474,7 @@ async function enablePushNotifications() {
 	const permission = Notification.permission === 'granted'
 		? 'granted'
 		: await Notification.requestPermission()
-	updatePushPermissionBanner()
+	updatePushControl()
 	if (permission !== 'granted') {
 		await clearPairedFcmToken()
 		throw new Error('Permissão de notificação negada.')
@@ -549,20 +549,6 @@ $('pushEnable').addEventListener('click', () => guarded(async () => {
 	updatePushControl()
 }))
 
-function updatePushPermissionBanner() {
-	const banner = $('pushPermissionBanner')
-	const message = $('pushPermissionMessage')
-	if (!banner || !message) return
-	const permission = 'Notification' in window ? Notification.permission : 'unsupported'
-	const connected = isConnected()
-	banner.classList.toggle('hidden', !connected || permission === 'granted')
-	message.textContent = permission === 'denied'
-		? 'As notificações estão bloqueadas. Libere a permissão nas configurações do dispositivo.'
-		: 'Permita o envio de notificações para receber alertas do alimentador.'
-	updatePushControl()
-}
-
-updatePushPermissionBanner()
 updatePushControl()
 if (typeof navigator.permissions?.query === 'function') {
 	navigator.permissions.query({ name: 'notifications' }).then(status => {
@@ -616,7 +602,7 @@ async function clearPairedFcmToken() {
 async function syncPushAuthorization() {
 	if (!isConnected()) return
 	if (!('Notification' in window) || Notification.permission !== 'granted') {
-		updatePushPermissionBanner()
+		updatePushControl()
 		try { await clearPairedFcmToken() }
 		catch (error) { log(`Falha ao remover o destino FCM: ${error?.message || error}`, 'error') }
 		return
