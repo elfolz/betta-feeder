@@ -64,7 +64,7 @@ function waitForBleResponse(predicate, timeoutMs = 3000) {
 		waiter.timer = setTimeout(() => {
 			const index = bleResponseWaiters.indexOf(waiter)
 			if (index >= 0) bleResponseWaiters.splice(index, 1)
-			reject(new Error('Tempo esgotado aguardando resposta do ESP32.'))
+			reject(new Error('Tempo esgotado aguardando resposta do Arduino.'))
 		}, timeoutMs)
 		bleResponseWaiters.push(waiter)
 	})
@@ -85,7 +85,7 @@ async function sendCommandAndWait(command, predicate) {
 	const responsePromise = waitForBleResponse(predicate)
 	await sendCommand(command)
 	const response = await responsePromise
-	if (response.startsWith('ERRO:')) throw new Error(`ESP32: ${response}`)
+	if (response.startsWith('ERRO:')) throw new Error(`Arduino: ${response}`)
 	return response
 }
 
@@ -108,7 +108,6 @@ function setConnected(connected, name = 'BettaFeeder') {
 	$('pushEnable').disabled = !connected
 	$('pushTest').disabled = !(connected && Boolean(currentFcmToken))
 	$('connectButton').querySelector('.connect-button-label').textContent = connected ? 'Desconectar' : 'Conectar'
-	$('pushPair').disabled = !(connected && Boolean(currentFcmToken))
 	$('serialConnectButton').querySelector('.serial-button-label').textContent = connectionMode === 'serial' && connected
 		? 'Desconectar Serial'
 		: 'Conectar via USB Serial'
@@ -126,7 +125,7 @@ function setConnectionLoading(loading) {
 }
 
 function parseDeviceMessage(message) {
-	log(`ESP32: ${message}`, 'success')
+	log(`Arduino: ${message}`, 'success')
 	resolveBleResponse(message)
 	if (!message.startsWith('STATUS;')) return
 	const fields = Object.fromEntries(message.split(';').slice(1).map(part => {
@@ -138,7 +137,7 @@ function parseDeviceMessage(message) {
 	$('positionStatus').textContent = fields.posicao || '—'
 	$('portionsStatus').textContent = fields.porcoes_lote || '—'
 	$('batchStatus').textContent = `${fields.lote || '—'} · referência: ${fields.referencia || '—'}`
-	if (fields.push) $('pushState').textContent = 'Destino no ESP32: ' + fields.push
+	if (fields.push) $('pushState').textContent = 'Destino no Arduino: ' + fields.push
 	const ready = fields.lote === 'pronto' && fields.referencia === 'confirmada'
 	$('testFeedButton').disabled = !(isConnected() && ready)
 	if (fields.feed1) $('feed1').value = fields.feed1
@@ -200,7 +199,7 @@ async function connectSerial() {
 	setConnectionLoading(true)
 	try {
 		if (!('serial' in navigator)) throw new Error('Web Serial não está disponível. Use Chrome ou Edge em HTTPS/localhost.')
-		log('Selecione a porta USB Serial do ESP32...')
+		log('Selecione a porta USB Serial do Arduino...')
 		await attachSerialPort(await navigator.serial.requestPort(), false)
 	} finally {
 		connectionInProgress = false
@@ -222,7 +221,7 @@ async function attachSerialPort(port, automatic) {
 	$('serialConnectButton').querySelector('.serial-button-label').textContent = 'Desconectar Serial'
 	log(automatic
 		? 'Serial reconectada automaticamente. Bluetooth será desativado pelo primeiro comando.'
-		: 'Serial conectada. O primeiro comando desativará o Bluetooth no ESP32.', 'success')
+		: 'Serial conectada. O primeiro comando desativará o Bluetooth no Arduino.', 'success')
 	void readSerialLoop()
 	await sendCommand('STATUS')
 	void syncPushAuthorization()
@@ -337,7 +336,7 @@ async function disconnect() {
 		// O firmware mantém o modo serial persistente e só reativa o BLE após
 		// receber BLE_ON. Envie o comando antes de fechar a porta.
 		try {
-			log('Solicitando reativação do Bluetooth no ESP32...')
+			log('Solicitando reativação do Bluetooth no Arduino...')
 			await sendCommand('BLE_ON')
 			await new Promise(resolve => setTimeout(resolve, 350))
 		} catch (error) {
@@ -395,7 +394,7 @@ $('saveTimesButton').addEventListener('click', () => guarded(async () => {
 	await sendCommand(`FEED1=${first}`)
 	await new Promise(resolve => setTimeout(resolve, 180))
 	await sendCommand(`FEED2=${second}`)
-	toast('Horários enviados ao ESP32')
+	toast('Horários enviados ao Arduino')
 }))
 
 $('wifiForm').addEventListener('submit', event => guarded(async () => {
@@ -476,7 +475,10 @@ async function enablePushNotifications() {
 		? 'granted'
 		: await Notification.requestPermission()
 	updatePushPermissionBanner()
-	if (permission !== 'granted') throw new Error('Permissão de notificação negada.')
+	if (permission !== 'granted') {
+		await clearPairedFcmToken()
+		throw new Error('Permissão de notificação negada.')
+	}
 	if (!window.firebase?.messaging?.isSupported) throw new Error('Firebase SDK não carregado.')
 	if (!await firebase.messaging.isSupported()) throw new Error('FCM não suportado neste dispositivo.')
 	if (!firebase.apps.length) firebase.initializeApp(window.BETTA_FIREBASE_CONFIG)
@@ -489,8 +491,7 @@ async function enablePushNotifications() {
 	})
 	if (!token) throw new Error('Firebase não forneceu token de registro.')
 	currentFcmToken = token
-	$('pushState').textContent = 'Push ativo neste dispositivo. Vincule-o ao ESP32 pela conexão ativa.'
-	$('pushPair').disabled = !isConnected()
+	$('pushState').textContent = 'Push ativo neste dispositivo. O registro no Arduino ocorre automaticamente quando conectado.'
 	$('pushTest').disabled = true
 	if (!messageListenerRegistered) {
 		messageListenerRegistered = true
@@ -521,8 +522,32 @@ async function showNativeNotification(title, body) {
 	}
 }
 
-$('pushEnable').addEventListener('click', () => guarded(enablePushNotifications))
-$('pushPermissionButton').addEventListener('click', () => guarded(enablePushNotifications))
+const pushTestMode = new URLSearchParams(window.location.search).get('modoTeste') === 'true'
+$('pushTest').classList.toggle('hidden', !pushTestMode)
+
+function updatePushControl() {
+	const permissionGranted = 'Notification' in window && Notification.permission === 'granted'
+	const enableButton = $('pushEnable')
+	enableButton.textContent = permissionGranted ? 'Desativar notificações e remover a permissão' : 'Ativar notificações'
+	enableButton.classList.toggle('button-danger', permissionGranted)
+	enableButton.disabled = !isConnected()
+	$('pushTest').classList.toggle('hidden', !pushTestMode)
+}
+
+async function disablePushNotifications() {
+	if (fbMessaging && currentFcmToken) await fbMessaging.deleteToken()
+	currentFcmToken = ''
+	await clearPairedFcmToken()
+	$('pushState').textContent = 'Notificações desativadas neste dispositivo. A permissão do navegador continua concedida.'
+	$('pushTest').disabled = true
+	updatePushControl()
+}
+
+$('pushEnable').addEventListener('click', () => guarded(async () => {
+	if ('Notification' in window && Notification.permission === 'granted') await disablePushNotifications()
+	else await enablePushNotifications()
+	updatePushControl()
+}))
 
 function updatePushPermissionBanner() {
 	const banner = $('pushPermissionBanner')
@@ -534,12 +559,14 @@ function updatePushPermissionBanner() {
 	message.textContent = permission === 'denied'
 		? 'As notificações estão bloqueadas. Libere a permissão nas configurações do dispositivo.'
 		: 'Permita o envio de notificações para receber alertas do alimentador.'
+	updatePushControl()
 }
 
 updatePushPermissionBanner()
+updatePushControl()
 if (typeof navigator.permissions?.query === 'function') {
 	navigator.permissions.query({ name: 'notifications' }).then(status => {
-		status.addEventListener('change', updatePushPermissionBanner)
+		status.addEventListener('change', () => { void syncPushAuthorization() })
 	}).catch(() => { })
 }
 
@@ -564,7 +591,7 @@ function pairFcmToken() {
 			message => message === 'OK: destino FCM salvo' || message.startsWith('ERRO:')
 		)
 		$('pushTest').disabled = false
-		$('pushState').textContent = 'Destino enviado ao ESP32. Use Notificação de teste.'
+		$('pushState').textContent = 'Destino enviado ao Arduino. Use Notificação de teste.'
 		await new Promise(resolve => setTimeout(resolve, 250))
 		await sendCommand('STATUS')
 	})()
@@ -575,10 +602,23 @@ function pairFcmToken() {
 	return fcmPairPromise
 }
 
+async function clearPairedFcmToken() {
+	if (!isConnected() || !hasCommandTransport()) return
+	await sendCommandAndWait(
+		'FCM_CLEAR',
+		message => message === 'OK: destino FCM removido' || message.startsWith('ERRO:')
+	)
+	currentFcmToken = ''
+	$('pushTest').disabled = true
+	$('pushState').textContent = 'Destino de notificação removido do Arduino.'
+}
+
 async function syncPushAuthorization() {
 	if (!isConnected()) return
 	if (!('Notification' in window) || Notification.permission !== 'granted') {
 		updatePushPermissionBanner()
+		try { await clearPairedFcmToken() }
+		catch (error) { log(`Falha ao remover o destino FCM: ${error?.message || error}`, 'error') }
 		return
 	}
 	try {
@@ -588,15 +628,10 @@ async function syncPushAuthorization() {
 	}
 }
 
-$('pushPair').addEventListener('click', () => guarded(async () => {
-	if (!currentFcmToken) throw new Error('Ative as notificações primeiro.')
-	if (!hasCommandTransport()) throw new Error('Conecte ao ESP32 por Bluetooth ou USB Serial.')
-	await pairFcmToken()
-	toast('Dispositivo vinculado ao Alimentador automatico')
-}))
 
 $('pushTest').addEventListener('click', () => guarded(async () => {
-	if (!isConnected() || !hasCommandTransport()) throw new Error('Conecte ao ESP32 por Bluetooth ou USB Serial.')
+	if (!pushTestMode) return
+	if (!isConnected() || !hasCommandTransport()) throw new Error('Conecte ao Arduino por Bluetooth ou USB Serial.')
 	const button = $('pushTest')
 	button.disabled = true
 	try {

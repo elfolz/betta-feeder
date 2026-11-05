@@ -18,13 +18,13 @@
         <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
         <span>BETTA<span class="brand-light">FEEDER</span></span>
       </a>
-      <span class="version">ESP32 · BLE / USB</span>
+      <span class="version">Arduino · BLE / USB</span>
     </header>
 
     <section class="hero">
       <div class="eyebrow"><span class="pulse-dot"></span> CONTROLE DO ALIMENTADOR</div>
       <h1>Seu aquário.<br><span>Na hora certa.</span></h1>
-      <p>Configure a rede Wi-Fi e os horários de alimentação diretamente pelo Bluetooth.</p>
+      <p>Configure a rede Wi-Fi e os horários de alimentação via pelo Bluetooth ou USB.</p>
     </section>
 
     <div id="pushPermissionBanner" class="notice warning push-permission-banner" role="status" aria-live="polite">
@@ -32,7 +32,6 @@
         <strong>Ative as notificações do BettaFeeder</strong>
         <span id="pushPermissionMessage">Permita o envio de notificações para receber alertas do alimentador.</span>
       </div>
-      <button id="pushPermissionButton" class="button button-primary" type="button">Permitir notificações</button>
     </div>
 
     <section class="connection-card panel">
@@ -67,7 +66,7 @@
         </div>
         <span class="step-tag">2 por dia</span>
       </div>
-      <p class="helper">Defina os dois horários em que o ESP32 deve liberar uma porção.</p>
+      <p class="helper">Defina os dois horários em que o Arduino deve liberar uma porção.</p>
       <div class="time-grid">
         <label class="time-field">
           <span><b class="meal-number">01</b> Primeira alimentação</span>
@@ -78,7 +77,7 @@
           <input id="feed2" type="time" value="20:00" required>
         </label>
       </div>
-      <button id="saveTimesButton" class="button button-secondary full" disabled>Enviar horários ao ESP32</button>
+      <button id="saveTimesButton" class="button button-secondary full" disabled>Enviar horários ao Arduino</button>
     </section>
 
     <section class="panel">
@@ -89,7 +88,7 @@
         </div>
         <span class="step-tag">Sincronização NTP</span>
       </div>
-      <p class="helper">O ESP32 usa a internet para acertar a data e a hora automaticamente.</p>
+      <p class="helper">O Arduino usa a internet para acertar a data e a hora automaticamente.</p>
       <form id="wifiForm" autocomplete="off">
         <label class="input-field">
           <span>Nome da rede (SSID)</span>
@@ -104,7 +103,7 @@
         </label>
         <button id="saveWifiButton" class="button button-secondary full" type="submit" disabled>Enviar dados do Wi-Fi</button>
       </form>
-      <p class="privacy-note"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg> A senha é enviada diretamente ao ESP32 e não é armazenada pelo aplicativo.</p>
+      <p class="privacy-note"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg> A senha é enviada diretamente ao Arduino e não é armazenada pelo aplicativo.</p>
     </section>
 
     <section class="panel status-panel">
@@ -117,7 +116,7 @@
       </div>
       <div class="status-grid">
         <div class="status-item"><small>Wi-Fi</small><strong id="wifiStatus">—</strong></div>
-        <div class="status-item"><small>Hora do ESP32</small><strong id="clockStatus">—</strong></div>
+        <div class="status-item"><small>Hora do Arduino</small><strong id="clockStatus">—</strong></div>
         <div class="status-item"><small>Posição do rotor</small><strong id="positionStatus">—</strong></div>
         <div class="status-item"><small>Porções no ciclo</small><strong id="portionsStatus">—</strong></div>
       </div>
@@ -127,17 +126,16 @@
         <button id="reloadButton" class="button button-secondary" disabled>Confirmar recarga (14 porções)</button>
       </div>
       <p class="helper small" id="batchStatus">Lote e referência ainda não verificados.</p>
-      <p class="helper small">Após iniciar ou reiniciar o ESP32: alinhe manualmente a cavidade vazia, defina a posição inicial, preencha as 14 cavidades e confirme a recarga. Sem isso, o firmware V4 bloqueia a alimentação automática.</p>
+      <p class="helper small">Após iniciar ou reiniciar o Arduino: alinhe manualmente a cavidade vazia, defina a posição inicial, preencha as 14 cavidades e confirme a recarga. Sem isso, o firmware V4 bloqueia a alimentação automática.</p>
     </section>
 
     <section class="panel">
-      <div class="card-heading"><div><div class="section-kicker">NOTIFICAÇÕES</div><h2>Receba uma notificação quando seu peixe for alimentado</h2></div></div>
-      <p class="helper">Ative o push neste dispositivo e vincule-o ao alimentador automático por Bluetooth. O push funciona sem Bluetooth depois do registro.</p>
-      <p class="helper small" id="pushState" aria-live="polite">Firebase ainda não configurado.</p>
+      <div class="card-heading"><div><div class="section-kicker">NOTIFICAÇÕES</div><h2>Ative as notificações do BettaFeeder</h2></div></div>
+      <p class="helper">Permita o envio de notificações para receber alertas do alimentador.</p>
+      <p class="helper small" id="pushState" aria-live="polite"></p>
       <div class="status-actions">
         <button id="pushEnable" class="button button-primary" disabled>Ativar notificações</button>
-        <button id="pushPair" class="button button-secondary" disabled>Vincular este dispositivo ao Alimentador automático</button>
-        <button id="pushTest" class="button button-ghost" disabled>Notificação de teste</button>
+        <button id="pushTest" class="button button-ghost hidden" disabled>Notificação de teste</button>
       </div>
       <p class="helper small">As notificações dependem de Wi-Fi, horário NTP correto e permissão no navegador. O motor não tem sensor para confirmar a queda dos grãos.</p>
     </section>
