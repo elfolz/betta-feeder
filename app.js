@@ -8,6 +8,7 @@ const BLE = {
 const $ = (id) => document.getElementById(id);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+const SAVED_DEVICE_KEY = 'bettaFeeder.bluetoothDevice';
 let device = null;
 let server = null;
 let rxCharacteristic = null;
@@ -39,6 +40,34 @@ function toast(message) {
   el.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+}
+
+function errorMessage(error, fallback = 'Ocorreu um erro ao conectar ao Bluetooth.') {
+  if (error?.name === 'NotFoundError') return 'Nenhum dispositivo BettaFeeder foi selecionado.';
+  if (error?.name === 'SecurityError') return 'O navegador bloqueou o acesso ao Bluetooth.';
+  return error?.message || fallback;
+}
+
+function saveDevice(deviceToSave) {
+  try {
+    localStorage.setItem(SAVED_DEVICE_KEY, JSON.stringify({
+      id: deviceToSave.id,
+      name: deviceToSave.name || 'BettaFeeder'
+    }));
+  } catch (error) {
+    console.warn('Não foi possível salvar o dispositivo Bluetooth:', error);
+  }
+}
+
+function getSavedDevice() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SAVED_DEVICE_KEY) || 'null');
+    return saved?.id ? saved : null;
+  } catch (error) {
+    console.warn('Dispositivo Bluetooth salvo inválido:', error);
+    localStorage.removeItem(SAVED_DEVICE_KEY);
+    return null;
+  }
 }
 
 function setConnected(connected, name = 'BettaFeeder') {
@@ -73,17 +102,22 @@ function onNotification(event) {
   message.split(/\r?\n/).filter(Boolean).forEach(parseDeviceMessage);
 }
 
-async function connect() {
+async function connect(deviceToConnect = null) {
   if (!('bluetooth' in navigator)) {
     $('bleWarning').classList.remove('hidden');
     throw new Error('Web Bluetooth não está disponível neste navegador.');
   }
   if (!window.isSecureContext) throw new Error('O Bluetooth exige HTTPS ou localhost.');
-  log('Procurando BettaFeeder por Bluetooth…');
-  device = await navigator.bluetooth.requestDevice({
-    filters: [{name: 'BettaFeeder'}],
-    optionalServices: [BLE.service]
-  });
+  if (deviceToConnect) {
+    device = deviceToConnect;
+    log('Tentando reconectar ao BettaFeeder salvo...');
+  } else {
+    log('Procurando BettaFeeder por Bluetooth...');
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{name: 'BettaFeeder'}],
+      optionalServices: [BLE.service]
+    });
+  }
   device.addEventListener('gattserverdisconnected', onDisconnected);
   server = await device.gatt.connect();
   const service = await server.getPrimaryService(BLE.service);
@@ -92,9 +126,46 @@ async function connect() {
   await txCharacteristic.startNotifications();
   txCharacteristic.addEventListener('characteristicvaluechanged', onNotification);
   setConnected(true, device.name || 'BettaFeeder');
+  saveDevice(device);
   log('Bluetooth conectado e notificações ativadas.', 'success');
   toast('Conectado ao BettaFeeder');
   await sendCommand('STATUS');
+}
+
+async function reconnectSavedDevice() {
+  const savedDevice = getSavedDevice();
+  if (!savedDevice) return;
+
+  if (!('bluetooth' in navigator) || !window.isSecureContext) {
+    const message = 'A reconexão Bluetooth exige um navegador compatível e HTTPS (ou localhost).';
+    log(message, 'error');
+    toast(message);
+    return;
+  }
+
+  if (typeof navigator.bluetooth.getDevices !== 'function') {
+    const message = 'Este navegador não permite reconectar automaticamente. Toque em Conectar para selecionar o BettaFeeder.';
+    log(message, 'error');
+    toast(message);
+    return;
+  }
+
+  try {
+    const permittedDevices = await navigator.bluetooth.getDevices();
+    const rememberedDevice = permittedDevices.find(item => item.id === savedDevice.id);
+    if (!rememberedDevice) {
+      const message = 'O dispositivo salvo não está disponível para reconexão. Clique em Conectar para selecioná-lo novamente.';
+      log('O dispositivo salvo não está disponível para reconexão.', 'error');
+      toast(message);
+      return;
+    }
+    await connect(rememberedDevice);
+  } catch (error) {
+    const message = errorMessage(error, 'Não foi possível reconectar ao dispositivo salvo.');
+    console.error(error);
+    log(`Falha na reconexão automática: ${message}`, 'error');
+    toast(`Falha na reconexão: ${message}`);
+  }
 }
 
 function onDisconnected() {
@@ -122,8 +193,9 @@ async function guarded(action) {
   try { await action(); }
   catch (error) {
     console.error(error);
-    log(error?.message || String(error), 'error');
-    toast(error?.message || 'Ocorreu um erro');
+    const message = errorMessage(error);
+    log(message, 'error');
+    toast(message);
   }
 }
 
@@ -180,6 +252,8 @@ $('clearLogButton').addEventListener('click', () => {
 if (!('bluetooth' in navigator) || !window.isSecureContext) {
   $('bleWarning').classList.remove('hidden');
 }
+
+reconnectSavedDevice();
 
 if ('serviceWorker' in navigator && window.isSecureContext) {
   window.addEventListener('load', () => {
