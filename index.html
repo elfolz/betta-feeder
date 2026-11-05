@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#121212">
+  <meta name="description" content="Configuração Bluetooth do alimentador automático BettaFeeder.">
+  <title>BettaFeeder · Controle</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icons/icon-192.png">
+  <link rel="apple-touch-icon" href="./icons/icon-192.png">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="./" aria-label="BettaFeeder início">
+        <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span>BETTA<span class="brand-light">FEEDER</span></span>
+      </a>
+      <span class="version">ESP32 · BLE</span>
+    </header>
+
+    <section class="hero">
+      <div class="eyebrow"><span class="pulse-dot"></span> CONTROLE DO ALIMENTADOR</div>
+      <h1>Seu aquário.<br><span>Na hora certa.</span></h1>
+      <p>Configure a rede Wi-Fi e os horários de alimentação diretamente pelo Bluetooth.</p>
+    </section>
+
+    <section class="connection-card panel">
+      <div class="card-heading">
+        <div>
+          <div class="section-kicker">DISPOSITIVO</div>
+          <h2>Conexão Bluetooth</h2>
+        </div>
+        <span id="connectionBadge" class="status-badge offline"><i></i> Desconectado</span>
+      </div>
+      <div class="device-row">
+        <div class="device-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10-5 5V2l5 5L7 17" /></svg></div>
+        <div class="device-copy">
+          <strong id="deviceName">BettaFeeder</strong>
+          <small id="deviceDescription">Nenhum dispositivo conectado</small>
+        </div>
+        <button id="connectButton" class="button button-primary">Conectar</button>
+      </div>
+      <div id="bleWarning" class="notice warning hidden">
+        <strong>Bluetooth Web não disponível.</strong>
+        Abra esta página em Chrome ou Edge, em HTTPS, em um dispositivo compatível. O Safari/iPhone não oferece suporte ao Web Bluetooth.
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="card-heading">
+        <div>
+          <div class="section-kicker">AGENDA</div>
+          <h2>Horários de alimentação</h2>
+        </div>
+        <span class="step-tag">2 por dia</span>
+      </div>
+      <p class="helper">Defina os dois horários em que o ESP32 deve liberar uma porção.</p>
+      <div class="time-grid">
+        <label class="time-field">
+          <span><b class="meal-number">01</b> Primeira alimentação</span>
+          <input id="feed1" type="time" value="08:00" required>
+        </label>
+        <label class="time-field">
+          <span><b class="meal-number blue">02</b> Segunda alimentação</span>
+          <input id="feed2" type="time" value="20:00" required>
+        </label>
+      </div>
+      <button id="saveTimesButton" class="button button-secondary full" disabled>Enviar horários ao ESP32</button>
+    </section>
+
+    <section class="panel">
+      <div class="card-heading">
+        <div>
+          <div class="section-kicker">INTERNET</div>
+          <h2>Rede Wi-Fi</h2>
+        </div>
+        <span class="step-tag">Sincronização NTP</span>
+      </div>
+      <p class="helper">O ESP32 usa a internet para acertar a data e a hora automaticamente.</p>
+      <form id="wifiForm" autocomplete="off">
+        <label class="input-field">
+          <span>Nome da rede (SSID)</span>
+          <input id="ssid" name="ssid" type="text" placeholder="Nome da sua rede Wi-Fi" maxlength="64" autocomplete="off">
+        </label>
+        <label class="input-field">
+          <span>Senha do Wi-Fi</span>
+          <div class="password-wrap">
+            <input id="password" name="password" type="password" placeholder="Senha da rede" maxlength="128" autocomplete="new-password">
+            <button id="togglePassword" class="visibility-button" type="button" aria-label="Mostrar senha">Mostrar</button>
+          </div>
+        </label>
+        <button id="saveWifiButton" class="button button-secondary full" type="submit" disabled>Enviar dados do Wi-Fi</button>
+      </form>
+      <p class="privacy-note"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg> A senha é enviada diretamente ao ESP32 e não é armazenada pelo aplicativo.</p>
+    </section>
+
+    <section class="panel status-panel">
+      <div class="card-heading">
+        <div>
+          <div class="section-kicker">MONITORAMENTO</div>
+          <h2>Status do alimentador</h2>
+        </div>
+        <button id="statusButton" class="icon-button" title="Atualizar status" aria-label="Atualizar status" disabled>↻</button>
+      </div>
+      <div class="status-grid">
+        <div class="status-item"><small>Wi-Fi</small><strong id="wifiStatus">—</strong></div>
+        <div class="status-item"><small>Hora do ESP32</small><strong id="clockStatus">—</strong></div>
+        <div class="status-item"><small>Posição do rotor</small><strong id="positionStatus">—</strong></div>
+        <div class="status-item"><small>Porções no ciclo</small><strong id="portionsStatus">—</strong></div>
+      </div>
+      <div class="status-actions">
+        <button id="testFeedButton" class="button button-danger" disabled>Testar uma porção</button>
+        <button id="homeButton" class="button button-ghost" disabled>Definir posição inicial</button>
+      </div>
+      <p class="helper small">Use “Definir posição inicial” somente depois de alinhar fisicamente a cavidade vazia com a saída de ração.</p>
+    </section>
+
+    <section class="log-panel">
+      <div class="log-heading"><span>ATIVIDADE</span><button id="clearLogButton" class="text-button">Limpar</button></div>
+      <div id="log" class="log" role="log" aria-live="polite">
+        <div class="log-empty">Os eventos de conexão e configuração aparecerão aqui.</div>
+      </div>
+    </section>
+
+    <footer>
+      <span>BETTAFEEDER</span>
+      <span>Feito para cuidar no tempo certo.</span>
+    </footer>
+  </main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="./app.js" defer></script>
+</body>
+</html>
