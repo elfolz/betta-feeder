@@ -1,4 +1,16 @@
-// Service Worker PWA + FCM. Payloads de notificacao sao exibidos pelo SDK em segundo plano.
+// Service Worker PWA + Firebase Cloud Messaging.
+// O clique deve ser registrado antes do SDK para preservar o comportamento.
+self.addEventListener('notificationclick', event => {
+	event.notification.close()
+	event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clientList => {
+		for (const client of clientList) {
+			if ('focus' in client) return client.focus()
+		}
+		if (self.clients.openWindow) return self.clients.openWindow('./')
+		return undefined
+	}))
+})
+
 importScripts('./firebase-config.js')
 try {
 	importScripts('https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js')
@@ -7,13 +19,9 @@ try {
 		firebase.initializeApp(self.BETTA_FIREBASE_CONFIG)
 		const messaging = firebase.messaging()
 		messaging.onBackgroundMessage(payload => {
-			// Com notification, o SDK do FCM ja mostra a notificacao nativa.
-			// O handler personalizado e necessario apenas para data-only.
-			if (payload.notification) return undefined
-			const title = payload.notification?.title || payload.data?.title || 'BettaFeeder'
-			const body = payload.notification?.body || payload.data?.body || 'Nova notificação'
-			return self.registration.showNotification(title, {
-				body,
+			const source = payload.notification || payload.data || {}
+			return self.registration.showNotification(source.title || 'BettaFeeder', {
+				body: source.body || 'Nova notificação',
 				icon: './icons/icon-192.png',
 				badge: './icons/icon-192.png',
 				tag: 'bettafeeder-push',
@@ -22,9 +30,10 @@ try {
 		})
 	}
 } catch (error) {
-	console.warn('SDK de push indisponivel:', error)
+	console.warn('SDK de push indisponível:', error)
 }
-const CACHE_NAME = 'bettafeeder-pwa-v8'
+
+const CACHE_NAME = 'bettafeeder-pwa-v12'
 const ASSETS = ['./', './index.html', './styles.css', './app.js', './firebase-config.js', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png']
 self.addEventListener('install', event => {
 	event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)))
@@ -42,15 +51,4 @@ self.addEventListener('fetch', event => {
 		caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy))
 		return response
 	}).catch(() => caches.match(event.request).then(cached => cached || caches.match('./index.html'))))
-})
-
-self.addEventListener('notificationclick', event => {
-	event.notification.close()
-	event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clientList => {
-		for (const client of clientList) {
-			if ('focus' in client) return client.focus()
-		}
-		if (self.clients.openWindow) return self.clients.openWindow('./')
-		return undefined
-	}))
 })

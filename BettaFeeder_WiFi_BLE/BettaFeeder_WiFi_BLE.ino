@@ -7,7 +7,7 @@
 
   Arduino IDE:
   - Board package: "esp32 by Espressif Systems"
-  - BLEDevice is included with the ESP32 Arduino core.
+  - BLE uses NimBLE-Arduino, a lower-memory alternative to Bluedroid.
   - No DS3231 / RTC module required.
 
   BLE commands (write one command per BLE write):
@@ -21,6 +21,7 @@
     RELOAD         // confirm ALL 14 pockets manually loaded; rotor at 0
     CAL_STEPS=4076 // gearbox calibration; requires SET_HOME afterwards
     CLEAR_WIFI
+    BLE_ON         // reativa BLE e reinicia o ESP32
 
   Motor pins (ULN2003 IN1..IN4):
     IN1=GPIO16, IN2=GPIO17, IN3=GPIO18, IN4=GPIO19
@@ -36,10 +37,9 @@
 #include <esp_bt.h>
 #include <time.h>
 #include <Preferences.h>
-#include <BLEDevice.h>
-#include <BLEServer.h>
-#include <BLEUtils.h>
-#include <BLE2902.h>
+#include <NimBLEDevice.h>
+#include <NimBLEServer.h>
+#include <NimBLEUtils.h>
 #include <math.h>
 #include <memory>
 #include <cstring>
@@ -81,7 +81,7 @@ static const char* SERVICE_UUID = "7f510001-1b15-4f0b-9a2e-5b8f6a100001";
 static const char* RX_UUID      = "7f510002-1b15-4f0b-9a2e-5b8f6a100001";
 static const char* TX_UUID      = "7f510003-1b15-4f0b-9a2e-5b8f6a100001";
 
-BLECharacteristic* txCharacteristic = nullptr;
+NimBLECharacteristic* txCharacteristic = nullptr;
 bool bleConnected = false;
 bool serialMode = false;
 
@@ -120,7 +120,9 @@ unsigned long oauthExpiresAtMs = 0;
 String pendingPushEvent;
 String pendingPushText;
 unsigned long pushNextAttempt = 0;
+unsigned long lastPushWifiLog = 0;
 static const unsigned long PUSH_RETRY_MS = 60000;
+static const unsigned long PUSH_WIFI_WAIT_MS = 5000;
 
 static const int LATE_GRACE_MINUTES = 30; // skip a missed meal after 30 min
 
@@ -195,6 +197,7 @@ void saveSettings() {
   prefs.putBool("reload", awaitingReload);
   prefs.putBool("moving", motionInProgress);
   prefs.putUShort("steps", halfStepsPerRev);
+  prefs.putBool("serialMode", serialMode);
   // O token FCM e salvo apenas em FCM_SAVE/FCM_CLEAR.
 }
 
@@ -222,6 +225,7 @@ void loadSettings() {
   prefs.begin("bettafeed", false);
   wifiSSID = prefs.getString("ssid", "");
   fcmTargetToken = prefs.getString("fcmToken", "");
+  serialMode = prefs.getBool("serialMode", false);
   wifiPASS = prefs.getString("pass", "");
   feedMinute[0] = prefs.getUShort("feed1", 8 * 60);
   feedMinute[1] = prefs.getUShort("feed2", 20 * 60);
@@ -524,13 +528,10 @@ bool deliverPush(const String& title, const String& body) {
   }
   http.addHeader("Authorization", "Bearer " + token);
   http.addHeader("Content-Type", "application/json; charset=utf-8");
-  // Envia notification + data. O campo notification permite que o FCM
-  // mostre a notificacao nativa mesmo com a aba fechada; data preserva o
-  // tratamento personalizado no PWA e no Service Worker.
+  // Mensagem data-only: o onBackgroundMessage do Firebase no Service Worker
+  // exibe a notificacao nativa mesmo quando a aba estiver fechada.
   String payload = "{\"message\":{\"token\":\"" + jsonEscape(fcmTargetToken) +
-            "\",\"notification\":{\"title\":\"" + jsonEscape(title) +
-            "\",\"body\":\"" + jsonEscape(body) +
-            "\"},\"data\":{\"title\":\"" + jsonEscape(title) +
+            "\",\"data\":{\"title\":\"" + jsonEscape(title) +
             "\",\"body\":\"" + jsonEscape(body) +
             "\"},\"webpush\":{\"headers\":{\"Urgency\":\"high\"}}}}";
   int code = http.POST(payload);
@@ -568,6 +569,8 @@ bool deliverPush(const String& title, const String& body) {
 }
 // Um evento pendente, reenviado periodicamente ate conectar.
 // Sem RTC dedicado ou fila persistente: reiniciar pode perder este aviso.
+void connectWiFiIfNeeded();
+
 void queuePush(const String& event, const String& text) {
   pendingPushEvent = event;
   pendingPushText = text;
@@ -576,6 +579,22 @@ void queuePush(const String& event, const String& text) {
 }
 void processPush() {
   if (pendingPushEvent.isEmpty() || (int32_t)(millis() - pushNextAttempt) < 0) return;
+
+  // Primeiro inicia/continua a conexao Wi-Fi. O loop antigo tentava o FCM
+  // antes desta funcao e acabava adiando o push por 60 segundos.
+  connectWiFiIfNeeded();
+  if (WiFi.status() != WL_CONNECTED || !clockIsValid()) {
+    unsigned long now = millis();
+    pushNextAttempt = now + PUSH_WIFI_WAIT_MS;
+    if (now - lastPushWifiLog >= 15000 || lastPushWifiLog == 0) {
+      lastPushWifiLog = now;
+      notifyPushLog(WiFi.status() != WL_CONNECTED
+        ? "envio aguardando: Wi-Fi desconectado"
+        : "envio aguardando: NTP ainda nao sincronizado");
+    }
+    return;
+  }
+
   if (deliverPush("BettaFeeder", pendingPushText)) {
     pendingPushEvent = ""; pendingPushText = "";
     notifyPushLog("push entregue com sucesso");
@@ -707,7 +726,12 @@ void handleCommand(String cmd) {
   value.trim();
   key.toUpperCase();
 
-  if (key == "SSID" && value.length() > 0) {
+  if (key == "BLE_ON") {
+    prefs.putBool("serialMode", false);
+    notifyBLE("OK: BLE sera reativado apos reinicio");
+    delay(250);
+    ESP.restart();
+  } else if (key == "SSID" && value.length() > 0) {
     wifiSSID = value;
     saveSettings();
     wifiConnecting = false;
@@ -809,18 +833,19 @@ void handleCommand(String cmd) {
     ntpConfigured = false;
     notifyBLE("OK: dados Wi-Fi apagados.");
   } else {
-    notifyBLE("ERRO: comando desconhecido. Use STATUS, FEED, SET_HOME, RELOAD, CAL_STEPS, FCM_BEGIN, FCM_ADD, FCM_SAVE, FCM_CLEAR, FCM_TEST.");
+    notifyBLE("ERRO: comando desconhecido. Use STATUS, FEED, SET_HOME, RELOAD, CAL_STEPS, FCM_BEGIN, FCM_ADD, FCM_SAVE, FCM_CLEAR, FCM_TEST, BLE_ON.");
   }
 }
 
 void activateSerialMode() {
   if (serialMode) return;
   serialMode = true;
+  prefs.putBool("serialMode", true);
   bleConnected = false;
   txCharacteristic = nullptr;
   // A porta serial recebeu um comando: encerra o stack BLE e libera a RAM
-  // usada pelo Bluedroid antes de iniciar OAuth/TLS.
-  BLEDevice::deinit(true);
+  // usada pelo NimBLE antes de iniciar OAuth/TLS.
+  NimBLEDevice::deinit(true);
   Serial.printf("OK: SERIAL ativo; BLE desativado; heap=%u\n", ESP.getFreeHeap());
 }
 
@@ -843,56 +868,61 @@ void processSerialCommands() {
 }
 
 // ---------- BLE callbacks ----------
-class ServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer* server) override {
+class ServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer* server, NimBLEConnInfo& connInfo) override {
     bleConnected = true;
   }
-  void onDisconnect(BLEServer* server) override {
+  void onDisconnect(NimBLEServer* server, NimBLEConnInfo& connInfo, int reason) override {
     bleConnected = false;
-    BLEDevice::startAdvertising();
+    NimBLEDevice::startAdvertising();
   }
 };
 
-class RxCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* characteristic) override {
-    String value = characteristic->getValue();
-    if (value.isEmpty()) return;
+class RxCallbacks : public NimBLECharacteristicCallbacks {
+  uint8_t onWrite(NimBLECharacteristic* characteristic,
+                  NimBLEAttValue& value,
+                  NimBLEConnInfo& connInfo) override {
+    if (value.length() == 0) return 0;
+    String command(value.c_str());
 
     portENTER_CRITICAL(&commandMux);
-    size_t n = value.length();
+    size_t n = command.length();
     if (n >= sizeof(pendingCommand)) n = sizeof(pendingCommand) - 1;
-    memcpy(pendingCommand, value.c_str(), n);
+    memcpy(pendingCommand, command.c_str(), n);
     pendingCommand[n] = '\0';
     commandPending = true;
     portEXIT_CRITICAL(&commandMux);
+    return 0;
   }
 };
 
+static ServerCallbacks serverCallbacks;
+static RxCallbacks rxCallbacks;
+
 void startBLE() {
-  BLEDevice::init(BLE_DEVICE_NAME);
+  NimBLEDevice::init(BLE_DEVICE_NAME);
   // O protocolo usa fragmentos de 18 bytes e funciona com MTU 23. Nao
   // solicite MTU 247, pois isso aumenta o consumo de memoria do BLE.
-  BLEDevice::setMTU(23);
-  BLEServer* server = BLEDevice::createServer();
-  server->setCallbacks(new ServerCallbacks());
+  NimBLEDevice::setMTU(23);
+  NimBLEServer* server = NimBLEDevice::createServer();
+  server->setCallbacks(serverCallbacks);
 
-  BLEService* service = server->createService(SERVICE_UUID);
+  NimBLEService* service = server->createService(SERVICE_UUID);
 
   txCharacteristic = service->createCharacteristic(
-    TX_UUID, BLECharacteristic::PROPERTY_NOTIFY
+    TX_UUID, NIMBLE_PROPERTY::NOTIFY
   );
-  txCharacteristic->addDescriptor(new BLE2902());
 
-  BLECharacteristic* rx = service->createCharacteristic(
-    RX_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR
+  NimBLECharacteristic* rx = service->createCharacteristic(
+    RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
   );
-  rx->setCallbacks(new RxCallbacks());
+  rx->setCallbacks(rxCallbacks);
 
   service->start();
 
-  BLEAdvertising* advertising = BLEDevice::getAdvertising();
+  NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
   advertising->addServiceUUID(SERVICE_UUID);
-  advertising->setScanResponse(true);
+  advertising->enableScanResponse(true);
   advertising->start();
 }
 
@@ -916,7 +946,11 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
 
-  startBLE();
+  if (!serialMode) {
+    startBLE();
+  } else {
+    Serial.printf("SERIAL persistente: BLE nao inicializado; heap=%u\n", ESP.getFreeHeap());
+  }
 
   notifyBLE("BettaFeeder V5: confira a referencia fisica, use SET_HOME; apos recarga, RELOAD.");
   if (motionInProgress) notifyBLE("ALERTA: energia interrompida durante movimento anterior. Verifique rotor.");
@@ -943,9 +977,8 @@ void loop() {
 
   if (hasCommand) handleCommand(String(localCommand));
 
-  processPush();
-
   connectWiFiIfNeeded();
+  processPush();
 
   if (millis() - lastStatusCheck >= 1000) {
     lastStatusCheck = millis();

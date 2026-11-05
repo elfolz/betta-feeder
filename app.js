@@ -174,8 +174,7 @@ async function connect() {
 		if (!window.isSecureContext) throw new Error('O Bluetooth exige HTTPS ou localhost.')
 		log('Procurando BettaFeeder por Bluetooth...')
 		device = await navigator.bluetooth.requestDevice({
-			filters: [{ name: 'BettaFeeder' }],
-			optionalServices: [BLE.service]
+			filters: [{ services: [BLE.service] }]
 		})
 		device.addEventListener('gattserverdisconnected', onDisconnected)
 		server = await device.gatt.connect()
@@ -202,19 +201,55 @@ async function connectSerial() {
 	try {
 		if (!('serial' in navigator)) throw new Error('Web Serial não está disponível. Use Chrome ou Edge em HTTPS/localhost.')
 		log('Selecione a porta USB Serial do ESP32...')
-		serialPort = await navigator.serial.requestPort()
-		await serialPort.open({ baudRate: 115200 })
-		serialConnected = true
-		connectionMode = 'serial'
-		setConnected(true, 'BettaFeeder')
-		$('serialConnectButton').querySelector('.serial-button-label').textContent = 'Desconectar Serial'
-		log('Serial conectada. O primeiro comando desativará o Bluetooth no ESP32.', 'success')
-		void readSerialLoop()
-		await sendCommand('STATUS')
-		void syncPushAuthorization()
+		await attachSerialPort(await navigator.serial.requestPort(), false)
 	} finally {
 		connectionInProgress = false
 		setConnectionLoading(false)
+	}
+}
+
+async function attachSerialPort(port, automatic) {
+	serialPort = port
+	await serialPort.open({ baudRate: 115200 })
+	serialConnected = true
+	connectionMode = 'serial'
+	const info = serialPort.getInfo()
+	localStorage.setItem('bettafeeder.serialPort', JSON.stringify({
+		usbVendorId: info.usbVendorId || null,
+		usbProductId: info.usbProductId || null
+	}))
+	setConnected(true, 'BettaFeeder')
+	$('serialConnectButton').querySelector('.serial-button-label').textContent = 'Desconectar Serial'
+	log(automatic
+		? 'Serial reconectada automaticamente. Bluetooth será desativado pelo primeiro comando.'
+		: 'Serial conectada. O primeiro comando desativará o Bluetooth no ESP32.', 'success')
+	void readSerialLoop()
+	await sendCommand('STATUS')
+	void syncPushAuthorization()
+}
+
+async function reconnectSavedSerial() {
+	if (connectionInProgress || isConnected() || !window.isSecureContext || !('serial' in navigator)) return
+	let savedInfo = null
+	try { savedInfo = JSON.parse(localStorage.getItem('bettafeeder.serialPort') || 'null') } catch (_) { }
+	if (!savedInfo) return
+	const ports = await navigator.serial.getPorts()
+	if (!ports.length) return
+	const matchingPort = ports.find(port => {
+		const info = port.getInfo()
+		return info.usbVendorId === savedInfo.usbVendorId && info.usbProductId === savedInfo.usbProductId
+	})
+	if (!matchingPort) return
+	connectionInProgress = true
+	try {
+		await attachSerialPort(matchingPort, true)
+	} catch (error) {
+		serialConnected = false
+		serialPort = null
+		connectionMode = null
+		console.warn('Reconexão serial automática indisponível:', error)
+	} finally {
+		connectionInProgress = false
 	}
 }
 
@@ -299,11 +334,21 @@ function onSerialDisconnected() {
 async function disconnect() {
 	if (device?.gatt?.connected) return device.gatt.disconnect()
 	if (serialConnected) {
+		// O firmware mantém o modo serial persistente e só reativa o BLE após
+		// receber BLE_ON. Envie o comando antes de fechar a porta.
+		try {
+			log('Solicitando reativação do Bluetooth no ESP32...')
+			await sendCommand('BLE_ON')
+			await new Promise(resolve => setTimeout(resolve, 350))
+		} catch (error) {
+			console.warn('Não foi possível enviar BLE_ON antes de desconectar:', error)
+		}
 		serialConnected = false
 		try { await serialReader?.cancel() } catch (_) { }
 		try { serialWriter?.releaseLock() } catch (_) { }
 		serialWriter = null
 		try { await serialPort?.close() } catch (_) { }
+		localStorage.removeItem('bettafeeder.serialPort')
 		onSerialDisconnected()
 		return
 	}
@@ -401,6 +446,15 @@ if ('serviceWorker' in navigator && window.isSecureContext) {
 	})
 }
 
+// Web Serial só permite reconectar automaticamente portas que o usuário já
+// autorizou. Não abre seletor e não tenta reconectar Bluetooth.
+window.addEventListener('load', () => {
+	void reconnectSavedSerial()
+	if ('serial' in navigator) {
+		navigator.serial.addEventListener('connect', () => { void reconnectSavedSerial() })
+	}
+})
+
 // FCM Web: envia o token em blocos pequenos, compatíveis com BLE MTU 23.
 let currentFcmToken = ''
 let fbMessaging = null
@@ -428,6 +482,7 @@ async function enablePushNotifications() {
 	if (!firebase.apps.length) firebase.initializeApp(window.BETTA_FIREBASE_CONFIG)
 	fbMessaging = firebase.messaging()
 	const registration = await navigator.serviceWorker.register('./sw.js')
+	await registration.update()
 	const token = await fbMessaging.getToken({
 		vapidKey: window.BETTA_FIREBASE_CONFIG.vapidKey,
 		serviceWorkerRegistration: registration
