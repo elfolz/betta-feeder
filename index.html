@@ -41,7 +41,10 @@
           <strong id="deviceName">BettaFeeder</strong>
           <small id="deviceDescription">Nenhum dispositivo conectado</small>
         </div>
-        <button id="connectButton" class="button button-primary">Conectar</button>
+        <button id="connectButton" class="button button-primary" type="button" aria-busy="false">
+          <span class="connect-spinner" aria-hidden="true"></span>
+          <span class="connect-button-label">Conectar</span>
+        </button>
       </div>
       <div id="bleWarning" class="notice warning hidden">
         <strong>Bluetooth Web não disponível.</strong>

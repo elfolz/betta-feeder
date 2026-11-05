@@ -36,6 +36,10 @@ h2{font-size:19px;letter-spacing:-.035em;margin:0;font-weight:700}
 .button:hover:not(:disabled){filter:brightness(1.08);transform:translateY(-1px)}
 .button:disabled{opacity:.38;cursor:not-allowed}
 .button-primary{color:#071b16;background:var(--mint);box-shadow:0 5px 22px rgba(0,255,185,.12)}
+.connect-spinner{display:none;width:13px;height:13px;border:2px solid rgba(7,27,22,.28);border-top-color:#071b16;border-radius:50%;animation:connect-spin .7s linear infinite;vertical-align:-2px;margin-right:7px}
+.button-primary.is-loading .connect-spinner{display:inline-block}
+.button-primary.is-loading{cursor:wait}
+@keyframes connect-spin{to{transform:rotate(360deg)}}
 .button-secondary{color:#f7f9fc;background:linear-gradient(100deg,#2855e8,#3264ff)}
 .button-ghost{background:#292d33;color:#dbe0e6;border:1px solid #3b4149}
 .button-danger{background:rgba(255,89,100,.12);border:1px solid rgba(255,89,100,.3);color:#ff9299}

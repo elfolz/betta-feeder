@@ -14,6 +14,7 @@ let server = null;
 let rxCharacteristic = null;
 let txCharacteristic = null;
 let toastTimer = null;
+let connectionInProgress = false;
 
 function log(message, kind = 'info') {
   const logBox = $('log');
@@ -78,7 +79,17 @@ function setConnected(connected, name = 'BettaFeeder') {
   $('deviceName').textContent = name;
   $('deviceDescription').textContent = connected ? 'Conectado via Bluetooth Low Energy' : 'Nenhum dispositivo conectado';
   ['saveTimesButton','saveWifiButton','statusButton','testFeedButton','homeButton'].forEach(id => $(id).disabled = !connected);
-  $('connectButton').textContent = connected ? 'Desconectar' : 'Conectar';
+  $('connectButton').querySelector('.connect-button-label').textContent = connected ? 'Desconectar' : 'Conectar';
+}
+
+function setConnectionLoading(loading) {
+  const button = $('connectButton');
+  button.classList.toggle('is-loading', loading);
+  button.disabled = loading;
+  button.setAttribute('aria-busy', String(loading));
+  button.querySelector('.connect-button-label').textContent = loading
+    ? 'Conectando...'
+    : (device?.gatt?.connected ? 'Desconectar' : 'Conectar');
 }
 
 function parseDeviceMessage(message) {
@@ -102,7 +113,14 @@ function onNotification(event) {
   message.split(/\r?\n/).filter(Boolean).forEach(parseDeviceMessage);
 }
 
-async function connect(deviceToConnect = null) {
+async function connect(deviceToConnect = null, loadingAlreadySet = false) {
+  if (connectionInProgress && !loadingAlreadySet) return;
+  if (!loadingAlreadySet) {
+    connectionInProgress = true;
+    setConnectionLoading(true);
+  }
+
+  try {
   if (!('bluetooth' in navigator)) {
     $('bleWarning').classList.remove('hidden');
     throw new Error('Web Bluetooth não está disponível neste navegador.');
@@ -130,41 +148,45 @@ async function connect(deviceToConnect = null) {
   log('Bluetooth conectado e notificações ativadas.', 'success');
   toast('Conectado ao BettaFeeder');
   await sendCommand('STATUS');
+  } finally {
+    if (!loadingAlreadySet) {
+      connectionInProgress = false;
+      setConnectionLoading(false);
+    }
+  }
 }
 
 async function reconnectSavedDevice() {
   const savedDevice = getSavedDevice();
   if (!savedDevice) return;
 
-  if (!('bluetooth' in navigator) || !window.isSecureContext) {
-    const message = 'A reconexão Bluetooth exige um navegador compatível e HTTPS (ou localhost).';
-    log(message, 'error');
-    toast(message);
-    return;
-  }
-
-  if (typeof navigator.bluetooth.getDevices !== 'function') {
-    const message = 'Este navegador não permite reconectar automaticamente. Toque em Conectar para selecionar o BettaFeeder.';
-    log(message, 'error');
-    toast(message);
-    return;
-  }
+  if (connectionInProgress) return;
+  connectionInProgress = true;
+  setConnectionLoading(true);
 
   try {
+    if (!('bluetooth' in navigator) || !window.isSecureContext) {
+      throw new Error('A reconexão Bluetooth exige um navegador compatível e HTTPS (ou localhost).');
+    }
+
+    if (typeof navigator.bluetooth.getDevices !== 'function') {
+      throw new Error('Este navegador não permite reconectar automaticamente. Toque em Conectar para selecionar o BettaFeeder.');
+    }
+
     const permittedDevices = await navigator.bluetooth.getDevices();
     const rememberedDevice = permittedDevices.find(item => item.id === savedDevice.id);
     if (!rememberedDevice) {
-      const message = 'O dispositivo salvo não está disponível para reconexão. Clique em Conectar para selecioná-lo novamente.';
-      log('O dispositivo salvo não está disponível para reconexão.', 'error');
-      toast(message);
-      return;
+      throw new Error('O dispositivo salvo não está disponível para reconexão. Clique em Conectar para selecioná-lo novamente.');
     }
-    await connect(rememberedDevice);
+    await connect(rememberedDevice, true);
   } catch (error) {
     const message = errorMessage(error, 'Não foi possível reconectar ao dispositivo salvo.');
     console.error(error);
     log(`Falha na reconexão automática: ${message}`, 'error');
     toast(`Falha na reconexão: ${message}`);
+  } finally {
+    connectionInProgress = false;
+    setConnectionLoading(false);
   }
 }
 
