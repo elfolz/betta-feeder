@@ -524,10 +524,13 @@ bool deliverPush(const String& title, const String& body) {
   }
   http.addHeader("Authorization", "Bearer " + token);
   http.addHeader("Content-Type", "application/json; charset=utf-8");
-  // Mensagem data-only: o Service Worker controla explicitamente a exibicao
-  // mesmo quando a aba do PWA estiver fechada.
+  // Envia notification + data. O campo notification permite que o FCM
+  // mostre a notificacao nativa mesmo com a aba fechada; data preserva o
+  // tratamento personalizado no PWA e no Service Worker.
   String payload = "{\"message\":{\"token\":\"" + jsonEscape(fcmTargetToken) +
-            "\",\"data\":{\"title\":\"" + jsonEscape(title) +
+            "\",\"notification\":{\"title\":\"" + jsonEscape(title) +
+            "\",\"body\":\"" + jsonEscape(body) +
+            "\"},\"data\":{\"title\":\"" + jsonEscape(title) +
             "\",\"body\":\"" + jsonEscape(body) +
             "\"},\"webpush\":{\"headers\":{\"Urgency\":\"high\"}}}}";
   int code = http.POST(payload);
