@@ -18,7 +18,7 @@
         <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
         <span>BETTA<span class="brand-light">FEEDER</span></span>
       </a>
-      <span class="version">ESP32 · BLE</span>
+      <span class="version">ESP32 · BLE / SERIAL</span>
     </header>
 
     <section class="hero">
@@ -27,11 +27,19 @@
       <p>Configure a rede Wi-Fi e os horários de alimentação diretamente pelo Bluetooth.</p>
     </section>
 
+    <div id="pushPermissionBanner" class="notice warning push-permission-banner" role="status" aria-live="polite">
+      <div>
+        <strong>Ative as notificações do BettaFeeder</strong>
+        <span id="pushPermissionMessage">Permita o envio de notificações para receber alertas do alimentador.</span>
+      </div>
+      <button id="pushPermissionButton" class="button button-primary" type="button">Permitir notificações</button>
+    </div>
+
     <section class="connection-card panel">
       <div class="card-heading">
         <div>
           <div class="section-kicker">DISPOSITIVO</div>
-          <h2>Conexão Bluetooth</h2>
+          <h2>Conexão</h2>
         </div>
         <span id="connectionBadge" class="status-badge offline"><i></i> Desconectado</span>
       </div>
@@ -43,12 +51,11 @@
         </div>
         <button id="connectButton" class="button button-primary" type="button" aria-busy="false">
           <span class="connect-spinner" aria-hidden="true"></span>
-          <span class="connect-button-label">Conectar</span>
+          <span class="connect-button-label">Conectar via Bluetooth</span>
         </button>
-      </div>
-      <div id="bleWarning" class="notice warning hidden">
-        <strong>Bluetooth Web não disponível.</strong>
-        Abra esta página em Chrome ou Edge, em HTTPS, em um dispositivo compatível. O Safari/iPhone não oferece suporte ao Web Bluetooth.
+        <button id="serialConnectButton" class="button button-secondary" type="button">
+          <span class="serial-button-label">Conectar via USB</span>
+        </button>
       </div>
     </section>
 
@@ -117,8 +124,22 @@
       <div class="status-actions">
         <button id="testFeedButton" class="button button-danger" disabled>Testar uma porção</button>
         <button id="homeButton" class="button button-ghost" disabled>Definir posição inicial</button>
+        <button id="reloadButton" class="button button-secondary" disabled>Confirmar recarga (14 porções)</button>
       </div>
-      <p class="helper small">Use “Definir posição inicial” somente depois de alinhar fisicamente a cavidade vazia com a saída de ração.</p>
+      <p class="helper small" id="batchStatus">Lote e referência ainda não verificados.</p>
+      <p class="helper small">Após iniciar ou reiniciar o ESP32: alinhe manualmente a cavidade vazia, defina a posição inicial, preencha as 14 cavidades e confirme a recarga. Sem isso, o firmware V4 bloqueia a alimentação automática.</p>
+    </section>
+
+    <section class="panel">
+      <div class="card-heading"><div><div class="section-kicker">NOTIFICAÇÕES</div><h2>Receba uma notificação quando seu peixe for alimentado</h2></div></div>
+      <p class="helper">Ative o push neste dispositivo e vincule-o ao alimentador automático por Bluetooth. O push funciona sem Bluetooth depois do registro.</p>
+      <p class="helper small" id="pushState" aria-live="polite">Firebase ainda não configurado.</p>
+      <div class="status-actions">
+        <button id="pushEnable" class="button button-primary" disabled>Ativar notificações</button>
+        <button id="pushPair" class="button button-secondary" disabled>Vincular este dispositivo ao Alimentador automático</button>
+        <button id="pushTest" class="button button-ghost" disabled>Notificação de teste</button>
+      </div>
+      <p class="helper small">As notificações dependem de Wi-Fi, horário NTP correto e permissão no navegador. O motor não tem sensor para confirmar a queda dos grãos.</p>
     </section>
 
     <section class="log-panel">
@@ -134,6 +155,9 @@
     </footer>
   </main>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="./firebase-config.js" defer></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js" defer></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-compat.js" defer></script>
   <script src="./app.js" defer></script>
 </body>
 </html>

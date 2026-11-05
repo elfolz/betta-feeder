@@ -1,0 +1,6 @@
+{
+	"editor.tabSize": 2,
+	"editor.detectIndentation": false,
+	"editor.renderWhitespace": "boundary",
+	"js/ts.format.semicolons": "remove"
+}
