@@ -17,10 +17,10 @@
 	<main class="app-shell">
 		<header class="topbar">
 			<a class="brand" href="./" aria-label="BettaFeeder início">
-				<span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+				<img class="brand-mark" src="./icons/icon-192.png" alt="" aria-hidden="true">
 				<span>BETTA<span class="brand-light">FEEDER</span></span>
 			</a>
-			<span class="version">Arduino · BLE / USB</span>
+			<span class="version">ESP32 · Bluetooth / Serial</span>
 		</header>
 
 		<section class="hero">
@@ -49,7 +49,8 @@
 					<span class="connect-button-label">Conectar via Bluetooth</span>
 				</button>
 				<button id="serialConnectButton" class="button button-secondary" type="button">
-					<span class="serial-button-label">Conectar via USB</span>
+					<span class="connect-spinner" aria-hidden="true"></span>
+					<span class="serial-button-label">Conectar via USB serial</span>
 				</button>
 			</div>
 		</section>
@@ -64,20 +65,16 @@
 					disabled>↻</button>
 			</div>
 			<div class="status-grid">
+				<div class="status-item"><small>Porções restantes</small><strong id="portionsStatus">—</strong></div>
+				<div class="status-item"><small>Hora do ESP32</small><strong id="clockStatus">—</strong></div>
 				<div class="status-item"><small>Wi-Fi</small><strong id="wifiStatus">—</strong></div>
-				<div class="status-item"><small>Hora do Arduino</small><strong id="clockStatus">—</strong></div>
-				<div class="status-item"><small>Posição do rotor</small><strong id="positionStatus">—</strong></div>
-				<div class="status-item"><small>Porções no ciclo</small><strong id="portionsStatus">—</strong></div>
 			</div>
 			<div class="status-actions">
 				<button id="testFeedButton" class="button button-danger" disabled>Testar uma porção</button>
 				<button id="homeButton" class="button button-ghost" disabled>Definir posição inicial</button>
-				<button id="reloadButton" class="button button-secondary" disabled>Confirmar recarga (14 porções)</button>
 			</div>
-			<p class="helper small" id="batchStatus">Lote e referência ainda não verificados.</p>
-			<p class="helper small">Após iniciar ou reiniciar o Arduino: alinhe manualmente a cavidade vazia, defina a posição
-				inicial, preencha as 14 cavidades e confirme a recarga. Sem isso, o firmware V4 bloqueia a alimentação
-				automática.</p>
+			<p class="helper small" id="batchStatus">Referência ainda não verificada.</p>
+			<p class="helper small">Após iniciar ou reiniciar o ESP32, alinhe manualmente a cavidade vazia e defina a posição inicial. O alimentador continua o ciclo de rotação mesmo quando não há ração.</p>
 		</section>
 
 		<section class="panel">
@@ -88,18 +85,18 @@
 				</div>
 				<span class="step-tag">2 por dia</span>
 			</div>
-			<p class="helper">Defina os dois horários em que o Arduino deve liberar uma porção.</p>
+			<p class="helper">Defina os dois horários em que o ESP32 deve liberar uma porção.</p>
 			<div class="time-grid">
 				<label class="time-field">
 					<span><b class="meal-number">01</b> Primeira alimentação</span>
-					<input id="feed1" type="time" value="08:00" required>
+					<input id="feed1" type="time" value="08:00" required disabled>
 				</label>
 				<label class="time-field">
 					<span><b class="meal-number blue">02</b> Segunda alimentação</span>
-					<input id="feed2" type="time" value="20:00" required>
+					<input id="feed2" type="time" value="20:00" required disabled>
 				</label>
 			</div>
-			<button id="saveTimesButton" class="button button-secondary full" disabled>Enviar horários ao Arduino</button>
+			<button id="saveTimesButton" class="button button-secondary full" disabled>Enviar horários ao ESP32</button>
 		</section>
 
 		<section class="panel">
@@ -110,29 +107,31 @@
 				</div>
 				<span class="step-tag">Sincronização NTP</span>
 			</div>
-			<p class="helper">O Arduino usa a internet para acertar a data e a hora automaticamente.</p>
+			<p class="helper">O ESP32 usa a internet para acertar a data e a hora automaticamente.</p>
 			<form id="wifiForm" autocomplete="off">
-				<label class="input-field">
-					<span>Nome da rede (SSID)</span>
-					<input id="ssid" name="ssid" type="text" placeholder="Nome da sua rede Wi-Fi" maxlength="64"
-						autocomplete="off">
-				</label>
-				<label class="input-field">
-					<span>Senha do Wi-Fi</span>
-					<div class="password-wrap">
-						<input id="password" name="password" type="password" placeholder="Senha da rede" maxlength="128"
-							autocomplete="new-password">
-						<button id="togglePassword" class="visibility-button" type="button"
-							aria-label="Mostrar senha">Mostrar</button>
-					</div>
-				</label>
+				<div class="wifi-grid">
+					<label class="input-field">
+						<span>Nome da rede (SSID)</span>
+						<input id="ssid" name="ssid" type="text" placeholder="Nome da sua rede Wi-Fi" maxlength="64"
+							autocomplete="off" disabled>
+					</label>
+					<label class="input-field">
+						<span>Senha do Wi-Fi</span>
+						<div class="password-wrap">
+							<input id="password" name="password" type="password" placeholder="Senha da rede" maxlength="128"
+								autocomplete="new-password" disabled>
+							<button id="togglePassword" class="visibility-button" type="button"
+								aria-label="Mostrar senha" disabled>Mostrar</button>
+						</div>
+					</label>
+				</div>
 				<button id="saveWifiButton" class="button button-secondary full" type="submit" disabled>Enviar dados do
 					Wi-Fi</button>
 			</form>
 			<p class="privacy-note"><svg viewBox="0 0 24 24" aria-hidden="true">
 					<rect x="5" y="10" width="14" height="11" rx="2" />
 					<path d="M8 10V7a4 4 0 0 1 8 0v3" />
-				</svg> A senha é enviada diretamente ao Arduino e não é armazenada pelo aplicativo.</p>
+				</svg> A senha é enviada diretamente ao ESP32 e não é armazenada pelo aplicativo.</p>
 		</section>
 
 		<section class="panel">
@@ -146,10 +145,16 @@
 			<p class="helper small" id="pushState" aria-live="polite"></p>
 			<div class="status-actions">
 				<button id="pushEnable" class="button button-primary" disabled><span class="connect-spinner" aria-hidden="true"></span><span class="push-button-label">Ativar notificações</span></button>
-				<button id="pushTest" class="button button-ghost hidden" disabled>Notificação de teste</button>
+				<button id="pushTest" class="button button-ghost" disabled>Testar notificação</button>
 			</div>
-			<p class="helper small">As notificações dependem de Wi-Fi, horário NTP correto e permissão no navegador. O motor
-				não tem sensor para confirmar a queda dos grãos.</p>
+			<h3 class="notification-heading">Notificações push automáticas</h3>
+			<ul class="notification-list">
+				<li><strong>Alimentação acionada</strong><span>Enviada após cada acionamento programado ou manual, exceto na 14ª porção do ciclo, quando é substituída pelo aviso de fim de ciclo. Confirma o comando do motor, não a queda da ração.</span></li>
+				<li><strong>Ciclo de 14 porções concluído</strong><span>Enviada após a 14ª porção contada. É um aviso para verificar a ração; o ESP32 não tem sensor e continua girando nos próximos horários.</span></li>
+				<li><strong>Movimento interrompido</strong><span>Enviada ao iniciar se o ESP32 detectar que a energia foi interrompida durante o movimento. Confira o rotor e defina novamente a posição inicial.</span></li>
+				<li><strong>Horário perdido</strong><span>Enviada quando o ESP32 verifica o horário programado com mais de 30 minutos de atraso e ignora aquela alimentação.</span></li>
+			</ul>
+			<p class="helper small">Os avisos de horário perdido e movimento interrompido também aparecem no log se o PWA estiver conectado por Bluetooth ou USB. O envio de push precisa de permissão no navegador, destino FCM configurado, Wi-Fi e horário NTP válido. Se a rede ou o horário ainda não estiverem disponíveis, o ESP32 tenta enviar depois.</p>
 		</section>
 
 		<section class="log-panel">

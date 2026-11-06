@@ -17,8 +17,7 @@
     FEED2=20:00
     STATUS
     FEED
-    SET_HOME       // physically align empty pocket; requires RELOAD after loading
-    RELOAD         // confirm ALL 14 pockets manually loaded; rotor at 0
+    SET_HOME       // physically align empty pocket; resets the cycle counter
     CAL_STEPS=4076 // gearbox calibration; requires SET_HOME afterwards
     CLEAR_WIFI
     BLE_ON         // reativa BLE e reinicia o ESP32
@@ -98,7 +97,6 @@ int lastFeedDate[2] = {0, 0};
 
 uint8_t rotorPosition = 0;     // 0 = empty safety pocket at outlet
 uint8_t portionsDispensed = 0; // 0..14
-bool awaitingReload = true; // fail-safe until deliberate physical loading
 bool referenceValid = false; // after any reboot, manual verify required
 bool motionInProgress = false; // persisted before motor starts
 bool feedInProgress = false;
@@ -194,7 +192,6 @@ void saveSettings() {
   prefs.putInt("last2", lastFeedDate[1]);
   prefs.putUChar("position", rotorPosition);
   prefs.putUChar("portions", portionsDispensed);
-  prefs.putBool("reload", awaitingReload);
   prefs.putBool("moving", motionInProgress);
   prefs.putUShort("steps", halfStepsPerRev);
   prefs.putBool("serialMode", serialMode);
@@ -233,16 +230,14 @@ void loadSettings() {
   lastFeedDate[1] = prefs.getInt("last2", 0);
   rotorPosition = prefs.getUChar("position", 0);
   portionsDispensed = prefs.getUChar("portions", 0);
-  awaitingReload = prefs.getBool("reload", true);
   motionInProgress = prefs.getBool("moving", false);
   halfStepsPerRev = prefs.getUShort("steps", 4076);
   if (halfStepsPerRev < 3900 || halfStepsPerRev > 4200) halfStepsPerRev = 4076;
   // Without a homing sensor, position cannot be verified across a reboot.
   // A previous interruption during motion is especially dangerous.
   referenceValid = false;
-  if (motionInProgress) awaitingReload = true;
   if (rotorPosition >= POCKETS) rotorPosition = 0;
-  if (portionsDispensed > PORTIONS_PER_LOAD) { portionsDispensed = PORTIONS_PER_LOAD; awaitingReload = true; }
+  if (portionsDispensed > PORTIONS_PER_LOAD) portionsDispensed = PORTIONS_PER_LOAD;
 }
 
 void releaseMotor() {
@@ -607,9 +602,9 @@ void processPush() {
 void feedOnePortion(const char* source) {
   if (feedInProgress || motionInProgress) { notifyBLE("BLOQUEADO: motor ocupado."); return; }
   if (!referenceValid) { notifyBLE("BLOQUEADO: referencia desconhecida. Confira a posicao fisica e envie SET_HOME."); return; }
-  if (awaitingReload || portionsDispensed >= PORTIONS_PER_LOAD) {
-    notifyBLE("LOTE_VAZIO: recarregue 14 doses e envie RELOAD (rotor na posicao 0)."); return;
-  }
+  // The count is informational only. The carousel keeps rotating whether or
+  // not food was physically reloaded after the previous 14-pocket cycle.
+  if (portionsDispensed >= PORTIONS_PER_LOAD) portionsDispensed = 0;
   if (rotorPosition != portionsDispensed) {
     referenceValid = false;
     notifyBLE("FALHA: indice inconsistente. Confira fisicamente e envie SET_HOME."); return;
@@ -618,17 +613,16 @@ void feedOnePortion(const char* source) {
   rotateToNextPocket();
   portionsDispensed++;
   saveSettings();
-  notifyBLE(String("ALIMENTACAO: ") + source + "; porcoes_no_lote=" + String(portionsDispensed) + "/14");
+  notifyBLE(String("ALIMENTACAO: ") + source + "; porcoes_no_ciclo=" + String(portionsDispensed) + "/14");
   queuePush("FEED_COMMANDED", "Motor acionado; dose " + String(portionsDispensed) +
             "/14. Queda da racao nao confirmada por sensor.");
   if (portionsDispensed == PORTIONS_PER_LOAD) {
-    // Move to empty safety cavity after dose 14 and LATCH empty status.
-    // Do NOT silently reset portions and allow more feedings!
+    // Park at the empty pocket, report the estimated end of food, then allow
+    // the next scheduled/manual feed to start a new rotation cycle.
     rotateToNextPocket();
-    awaitingReload = true;
     saveSettings();
-    notifyBLE("LOTE_FINALIZADO: rotor na posicao vazia. Recarregue e envie RELOAD.");
-    queuePush("EMPTY", "Reservatorio vazio: recarregue 14 porcoes e confirme no aplicativo.");
+    notifyBLE("RACAO_FIM_CICLO: ciclo de 14 porcoes concluido; verifique e reabasteca se necessario.");
+    queuePush("EMPTY", "Ciclo de 14 porcoes concluido. Verifique e reabasteca a racao se necessario.");
   }
   feedInProgress = false;
 }
@@ -674,7 +668,7 @@ void processSchedule() {
   int today = dateKey(nowTm);
   int currentMinute = nowTm.tm_hour * 60 + nowTm.tm_min;
 
-  if (!referenceValid || awaitingReload || motionInProgress) return;
+  if (!referenceValid || motionInProgress) return;
   for (int slot = 0; slot < 2; slot++) {
     if (lastFeedDate[slot] == today) continue;
     if (currentMinute < feedMinute[slot]) continue;
@@ -686,14 +680,19 @@ void processSchedule() {
     if (lateBy <= LATE_GRACE_MINUTES) {
       feedOnePortion(slot == 0 ? "HORARIO_1" : "HORARIO_2");
     } else {
-      notifyBLE(String("HORARIO_PERDIDO: ") + (slot == 0 ? "1" : "2") +
-                "; atraso maior que 30 minutos, alimentacao ignorada.");
+      String missedMessage = String("Horario ") + (slot == 0 ? "1" : "2") +
+        " perdido: atraso maior que 30 minutos; alimentacao ignorada.";
+      notifyBLE(String("HORARIO_PERDIDO: ") + missedMessage);
+      queuePush("HORARIO_PERDIDO", missedMessage);
     }
   }
 }
 
 void sendStatus() {
   struct tm t;
+  uint8_t portionsRemaining = portionsDispensed >= PORTIONS_PER_LOAD
+    ? 0
+    : PORTIONS_PER_LOAD - portionsDispensed;
   String s = "STATUS;wifi=" + String(WiFi.status() == WL_CONNECTED ? "conectado" : "desconectado");
   s += ";ssid=" + wifiSSID;
   s += ";hora=";
@@ -706,8 +705,8 @@ void sendStatus() {
   s += ";feed1=" + formatHHMM(feedMinute[0]);
   s += ";feed2=" + formatHHMM(feedMinute[1]);
   s += ";posicao=" + String(rotorPosition) + "/15";
-  s += ";porcoes_lote=" + String(portionsDispensed) + "/14";
-  s += ";lote=" + String(awaitingReload ? "aguardando_recarga" : "pronto");
+  s += ";porcoes_restantes=" + String(portionsRemaining);
+  s += ";lote=" + String(portionsDispensed >= PORTIONS_PER_LOAD ? "fim_de_ciclo" : "em_ciclo");
   s += ";referencia=" + String(referenceValid ? "confirmada" : "verificar");
   s += ";movimento_interrompido=" + String(motionInProgress ? "sim" : "nao");
   s += ";passos_volta=" + String(halfStepsPerRev);
@@ -764,19 +763,9 @@ void handleCommand(String cmd) {
     rotorPosition = 0;
     portionsDispensed = 0;
     referenceValid = true;
-    awaitingReload = true; // requires explicit manual reload confirmation
     motionInProgress = false;
     saveSettings();
-    notifyBLE("OK: home definido. Depois de abastecer 14 cavidades, envie RELOAD.");
-  } else if (key == "RELOAD") {
-    if (!referenceValid || rotorPosition != 0 || motionInProgress) {
-      notifyBLE("ERRO: alinhe fisicamente cavidade vazia e use SET_HOME antes de RELOAD.");
-      return;
-    }
-    portionsDispensed = 0;
-    awaitingReload = false;
-    saveSettings();
-    notifyBLE("OK: lote de 14 porcoes confirmado manualmente.");
+    notifyBLE("OK: posicao inicial definida.");
   } else if (key == "CAL_STEPS") {
     int n = value.toInt();
     if (n < 3900 || n > 4200) { notifyBLE("ERRO: CAL_STEPS aceita 3900..4200."); return; }
@@ -833,7 +822,7 @@ void handleCommand(String cmd) {
     ntpConfigured = false;
     notifyBLE("OK: dados Wi-Fi apagados.");
   } else {
-    notifyBLE("ERRO: comando desconhecido. Use STATUS, FEED, SET_HOME, RELOAD, CAL_STEPS, FCM_BEGIN, FCM_ADD, FCM_SAVE, FCM_CLEAR, FCM_TEST, BLE_ON.");
+    notifyBLE("ERRO: comando desconhecido. Use STATUS, FEED, SET_HOME, CAL_STEPS, FCM_BEGIN, FCM_ADD, FCM_SAVE, FCM_CLEAR, FCM_TEST, BLE_ON.");
   }
 }
 
@@ -952,8 +941,12 @@ void setup() {
     Serial.printf("SERIAL persistente: BLE nao inicializado; heap=%u\n", ESP.getFreeHeap());
   }
 
-  notifyBLE("BettaFeeder V5: confira a referencia fisica, use SET_HOME; apos recarga, RELOAD.");
-  if (motionInProgress) notifyBLE("ALERTA: energia interrompida durante movimento anterior. Verifique rotor.");
+  notifyBLE("BettaFeeder V5: confira a referencia fisica e use SET_HOME para iniciar.");
+  if (motionInProgress) {
+    const String motionAlert = "Energia interrompida durante movimento do motor. Verifique o rotor e defina novamente a posicao inicial.";
+    notifyBLE(String("ALERTA: ") + motionAlert);
+    queuePush("MOVIMENTO_INTERROMPIDO", motionAlert);
+  }
   if (!wifiSSID.isEmpty()) {
     lastWiFiAttempt = 0;
     connectWiFiIfNeeded();

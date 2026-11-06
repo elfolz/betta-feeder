@@ -76,7 +76,7 @@ function waitForBleResponse(predicate, timeoutMs = 3000) {
 		waiter.timer = setTimeout(() => {
 			const index = bleResponseWaiters.indexOf(waiter)
 			if (index >= 0) bleResponseWaiters.splice(index, 1)
-			reject(new Error('Tempo esgotado aguardando resposta do Arduino.'))
+			reject(new Error('Tempo esgotado aguardando resposta do ESP32.'))
 		}, timeoutMs)
 		bleResponseWaiters.push(waiter)
 	})
@@ -97,7 +97,7 @@ async function sendCommandAndWait(command, predicate) {
 	const responsePromise = waitForBleResponse(predicate)
 	await sendCommand(command)
 	const response = await responsePromise
-	if (response.startsWith('ERRO:')) throw new Error(`Arduino: ${response}`)
+	if (response.startsWith('ERRO:')) throw new Error(`ESP32: ${response}`)
 	return response
 }
 
@@ -116,33 +116,44 @@ function setConnected(connected, name = 'BettaFeeder') {
 	$('deviceDescription').textContent = connected
 		? (connectionMode === 'serial' ? 'Conectado via USB Serial' : 'Conectado via Bluetooth Low Energy')
 		: 'Nenhum dispositivo conectado';
-	['saveTimesButton', 'saveWifiButton', 'statusButton', 'testFeedButton', 'homeButton', 'reloadButton'].forEach(id => $(id).disabled = !connected)
+	['saveTimesButton', 'saveWifiButton', 'statusButton', 'testFeedButton', 'homeButton'].forEach(id => $(id).disabled = !connected)
+	['feed1', 'feed2', 'ssid', 'password', 'togglePassword'].forEach(id => $(id).disabled = !connected)
 	$('pushEnable').disabled = !connected
-	$('pushTest').disabled = !(connected && Boolean(currentFcmToken))
+	$('pushTest').disabled = !connected
 	const bluetoothButton = $('connectButton')
 	const serialButton = $('serialConnectButton')
-	bluetoothButton.querySelector('.connect-button-label').textContent = connected ? 'Desconectar' : 'Conectar'
-	serialButton.querySelector('.serial-button-label').textContent = connectionMode === 'serial' && connected
-		? 'Desconectar Serial'
-		: 'Conectar via USB Serial'
+	const serialActive = connected && connectionMode === 'serial'
+	bluetoothButton.querySelector('.connect-button-label').textContent = connected && !serialActive ? 'Desconectar' : 'Conectar via Bluetooth'
+	bluetoothButton.disabled = serialActive || connectionInProgress
+	serialButton.disabled = (connected && Boolean(device?.gatt?.connected)) || serialButton.classList.contains('is-loading')
+	if (!serialButton.classList.contains('is-loading')) {
+		serialButton.querySelector('.serial-button-label').textContent = connectionMode === 'serial' && connected
+			? 'Desconectar Serial'
+			: 'Conectar via USB Serial'
+	}
 	bluetoothButton.classList.toggle('button-danger', connected && connectionMode !== 'serial')
 	serialButton.classList.toggle('button-danger', connected && connectionMode === 'serial')
 	updatePushControl()
 }
 
-function setConnectionLoading(loading) {
-	const button = $('connectButton')
+function setConnectionLoading(loading, mode = 'bluetooth') {
+	const serial = mode === 'serial'
+	const button = $(serial ? 'serialConnectButton' : 'connectButton')
 	button.classList.toggle('is-loading', loading)
-	button.disabled = loading
+	button.disabled = loading || (serial
+		? Boolean(device?.gatt?.connected)
+		: (serialConnected && connectionMode === 'serial'))
 	button.setAttribute('aria-busy', String(loading))
-	button.querySelector('.connect-button-label').textContent = loading
+	button.querySelector(serial ? '.serial-button-label' : '.connect-button-label').textContent = loading
 		? 'Conectando...'
-		: (device?.gatt?.connected ? 'Desconectar' : 'Conectar')
-	button.classList.toggle('button-danger', !loading && Boolean(device?.gatt?.connected))
+		: (serial
+			? (serialConnected ? 'Desconectar Serial' : 'Conectar via USB Serial')
+			: (device?.gatt?.connected ? 'Desconectar' : 'Conectar via Bluetooth'))
+	button.classList.toggle('button-danger', !loading && (serial ? serialConnected : Boolean(device?.gatt?.connected)))
 }
 
 function parseDeviceMessage(message) {
-	log(`Arduino: ${message}`, 'success')
+	log(`ESP32: ${message}`, 'success')
 	resolveBleResponse(message)
 	if (!message.startsWith('STATUS;')) return
 	const fields = Object.fromEntries(message.split(';').slice(1).map(part => {
@@ -155,11 +166,10 @@ function parseDeviceMessage(message) {
 		? `${dateMatch[3]}/${dateMatch[2]}/${dateMatch[1]}`
 		: fields.data
 	$('clockStatus').textContent = fields.hora && arduinoDate ? `${fields.hora} · ${arduinoDate}` : (fields.hora || '—')
-	$('positionStatus').textContent = fields.posicao || '—'
-	$('portionsStatus').textContent = fields.porcoes_lote || '—'
-	$('batchStatus').textContent = `${fields.lote || '—'} · referência: ${fields.referencia || '—'}`
-	if (fields.push) $('pushState').textContent = 'Destino no Arduino: ' + fields.push
-	const ready = fields.lote === 'pronto' && fields.referencia === 'confirmada'
+	$('portionsStatus').textContent = fields.porcoes_restantes || '—'
+	$('batchStatus').textContent = `Referência: ${fields.referencia || '—'}`
+	if (fields.push) $('pushState').textContent = 'Destino no ESP32: ' + fields.push
+	const ready = fields.referencia === 'confirmada'
 	$('testFeedButton').disabled = !(isConnected() && ready)
 	if (fields.feed1) $('feed1').value = fields.feed1
 	if (fields.feed2) $('feed2').value = fields.feed2
@@ -220,14 +230,14 @@ async function connect() {
 async function connectSerial() {
 	if (connectionInProgress || isConnected()) return
 	connectionInProgress = true
-	setConnectionLoading(true)
+	setConnectionLoading(true, 'serial')
 	try {
 		if (!('serial' in navigator)) throw new Error('Web Serial não está disponível. Use Chrome ou Edge em HTTPS/localhost.')
-		log('Selecione a porta USB Serial do Arduino...')
+		log('Selecione a porta USB Serial do ESP32...')
 		await attachSerialPort(await navigator.serial.requestPort(), false)
 	} finally {
 		connectionInProgress = false
-		setConnectionLoading(false)
+		setConnectionLoading(false, 'serial')
 	}
 }
 
@@ -244,8 +254,8 @@ async function attachSerialPort(port, automatic) {
 	setConnected(true, 'BettaFeeder')
 	$('serialConnectButton').querySelector('.serial-button-label').textContent = 'Desconectar Serial'
 	log(automatic
-		? 'Serial reconectada automaticamente. Bluetooth será desativado pelo primeiro comando.'
-		: 'Serial conectada. O primeiro comando desativará o Bluetooth no Arduino.', 'success')
+		? 'Serial reconectada automaticamente; Bluetooth será desativado pelo primeiro comando.'
+		: 'Serial conectada; Bluetooth será desativado pelo primeiro comando.', 'success')
 	void readSerialLoop()
 	await sendCommand('STATUS')
 	void syncPushAuthorization()
@@ -357,10 +367,9 @@ function onSerialDisconnected() {
 async function disconnect() {
 	if (device?.gatt?.connected) return device.gatt.disconnect()
 	if (serialConnected) {
-		// O firmware mantém o modo serial persistente e só reativa o BLE após
-		// receber BLE_ON. Envie o comando antes de fechar a porta.
+		// BLE_ON clears the firmware's persistent serial mode and restarts BLE.
 		try {
-			log('Solicitando reativação do Bluetooth no Arduino...')
+			log('Solicitando reativação do Bluetooth no ESP32...')
 			await sendCommand('BLE_ON')
 			await new Promise(resolve => setTimeout(resolve, 350))
 		} catch (error) {
@@ -419,7 +428,7 @@ $('saveTimesButton').addEventListener('click', () => guarded(async () => {
 	await new Promise(resolve => setTimeout(resolve, 180))
 	await sendCommand(`FEED2=${second}`)
 	saveFeedTimes(first, second)
-	toast('Horários enviados ao Arduino')
+	toast('Horários enviados ao ESP32')
 }))
 
 $('wifiForm').addEventListener('submit', event => guarded(async () => {
@@ -453,12 +462,6 @@ $('homeButton').addEventListener('click', () => guarded(async () => {
 	if (!confirm('Confirma que a cavidade vazia está fisicamente alinhada com a saída?')) return
 	await sendCommand('SET_HOME')
 }))
-$('reloadButton').addEventListener('click', () => guarded(async () => {
-	if (!confirm('Confirma que o rotor está na posição vazia 0 e que você colocou manualmente uma porção em CADA UMA das outras 14 cavidades?')) return
-	await sendCommand('RELOAD')
-	await new Promise(resolve => setTimeout(resolve, 300))
-	await sendCommand('STATUS')
-}))
 $('clearLogButton').addEventListener('click', () => {
 	$('log').innerHTML = '<div class="log-empty">Os eventos de conexão e configuração aparecerão aqui.</div>'
 })
@@ -477,6 +480,9 @@ window.addEventListener('load', () => {
 	void reconnectSavedSerial()
 	if ('serial' in navigator) {
 		navigator.serial.addEventListener('connect', () => { void reconnectSavedSerial() })
+		navigator.serial.addEventListener('disconnect', event => {
+			if (event.target === serialPort) onSerialDisconnected()
+		})
 	}
 })
 
@@ -517,8 +523,8 @@ async function enablePushNotifications() {
 	})
 	if (!token) throw new Error('Firebase não forneceu token de registro.')
 	currentFcmToken = token
-	$('pushState').textContent = 'Push ativo neste dispositivo. O registro no Arduino ocorre automaticamente quando conectado.'
-	$('pushTest').disabled = true
+	$('pushState').textContent = 'Push ativo neste dispositivo. O registro no ESP32 ocorre automaticamente quando conectado.'
+	$('pushTest').disabled = !isConnected()
 	if (!messageListenerRegistered) {
 		messageListenerRegistered = true
 		fbMessaging.onMessage(async payload => {
@@ -548,9 +554,6 @@ async function showNativeNotification(title, body) {
 	}
 }
 
-const pushTestMode = new URLSearchParams(window.location.search).get('modoTeste') === 'true'
-$('pushTest').classList.toggle('hidden', !pushTestMode)
-
 function updatePushControl() {
 	const permissionGranted = 'Notification' in window && Notification.permission === 'granted'
 	const enableButton = $('pushEnable')
@@ -560,7 +563,6 @@ function updatePushControl() {
 		: (permissionGranted ? 'Desativar notificações e remover a permissão' : 'Ativar notificações')
 	enableButton.classList.toggle('button-danger', permissionGranted)
 	enableButton.disabled = loading || !isConnected()
-	$('pushTest').classList.toggle('hidden', !pushTestMode)
 }
 
 async function disablePushNotifications() {
@@ -568,7 +570,7 @@ async function disablePushNotifications() {
 	currentFcmToken = ''
 	await clearPairedFcmToken()
 	$('pushState').textContent = 'Notificações desativadas neste dispositivo. A permissão do navegador continua concedida.'
-	$('pushTest').disabled = true
+	$('pushTest').disabled = !isConnected()
 	updatePushControl()
 }
 
@@ -620,7 +622,7 @@ function pairFcmToken() {
 			message => message === 'OK: destino FCM salvo' || message.startsWith('ERRO:')
 		)
 		$('pushTest').disabled = false
-		$('pushState').textContent = 'Destino enviado ao Arduino. Use Notificação de teste.'
+		$('pushState').textContent = 'Destino enviado ao ESP32. Use Notificação de teste.'
 		await new Promise(resolve => setTimeout(resolve, 250))
 		await sendCommand('STATUS')
 	})()
@@ -638,8 +640,8 @@ async function clearPairedFcmToken() {
 		message => message === 'OK: destino FCM removido' || message.startsWith('ERRO:')
 	)
 	currentFcmToken = ''
-	$('pushTest').disabled = true
-	$('pushState').textContent = 'Destino de notificação removido do Arduino.'
+	$('pushTest').disabled = !isConnected()
+	$('pushState').textContent = 'Destino de notificação removido do ESP32.'
 }
 
 async function syncPushAuthorization() {
@@ -659,8 +661,7 @@ async function syncPushAuthorization() {
 
 
 $('pushTest').addEventListener('click', () => guarded(async () => {
-	if (!pushTestMode) return
-	if (!isConnected() || !hasCommandTransport()) throw new Error('Conecte ao Arduino por Bluetooth ou USB Serial.')
+	if (!isConnected() || !hasCommandTransport()) throw new Error('Conecte ao ESP32 por Bluetooth ou USB Serial.')
 	const button = $('pushTest')
 	button.disabled = true
 	try {
@@ -670,6 +671,6 @@ $('pushTest').addEventListener('click', () => guarded(async () => {
 		$('pushState').textContent = 'Teste de push solicitado. Aguarde a notificação.'
 		toast('Notificação de teste solicitada')
 	} finally {
-		button.disabled = !(isConnected() && Boolean(currentFcmToken))
+		button.disabled = !isConnected()
 	}
 }))
