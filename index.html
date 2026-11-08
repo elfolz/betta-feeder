@@ -151,8 +151,9 @@
 			<h3 class="notification-heading">Notificações push automáticas</h3>
 			<ul class="notification-list">
 				<li><strong>Alimentação acionada</strong><span>Enviada após cada acionamento programado ou manual, exceto na 14ª porção do ciclo, quando é substituída pelo aviso de fim de ciclo. Confirma o comando do motor, não a queda da ração.</span></li>
-				<li><strong>Recarga necessária</strong><span>Enviada após a 14ª porção. O ESP32 para e só retoma quando a recarga for confirmada pelo botão no PWA.</span></li>
-				<li><strong>Temperatura da água abaixo de 22 °C</strong><span>O ESP32 envia um alerta quando a leitura do DS18B20 cai abaixo de 22 °C. Um novo alerta só é enviado depois que a água voltar a 22 °C ou mais e cair novamente.</span></li>
+				<li><strong>Recarga necessária</strong><span>O ESP32 envia esta notificação após a 14ª porção e volta a enviá-la a cada hora até a recarga ser confirmada pelo botão no PWA. O alimentador permanece parado nesse período.</span></li>
+				<li><strong>Temperatura da água abaixo de 24 °C</strong><span>Quando o DS18B20 consegue fazer a leitura e a água está abaixo de 24 °C, o ESP32 envia um alerta e repete a notificação a cada 30 minutos. A repetição para quando a leitura chegar a 24 °C ou mais.</span></li>
+				<li><strong>Temperatura da água acima de 28 °C</strong><span>Quando o DS18B20 consegue fazer a leitura e a água está acima de 28 °C, o ESP32 envia um alerta e repete a notificação a cada 30 minutos. A repetição para quando a leitura chegar a 28 °C ou menos.</span></li>
 				<li><strong>Movimento interrompido</strong><span>Enviada ao iniciar se o ESP32 detectar que a energia foi interrompida durante o movimento. Confira o rotor e defina novamente a posição inicial.</span></li>
 				<li><strong>Horário perdido</strong><span>Enviada quando o ESP32 verifica o horário programado com mais de 30 minutos de atraso e ignora aquela alimentação.</span></li>
 			</ul>
@@ -187,7 +188,7 @@
 	<script src="./firebase-config.js" defer></script>
 	<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js" defer></script>
 	<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-compat.js" defer></script>
-	<script src="./app.js?v=22" defer></script>
+	<script src="./app.js?v=24" defer></script>
 </body>
 
 </html>

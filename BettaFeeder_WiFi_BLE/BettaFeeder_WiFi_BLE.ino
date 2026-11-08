@@ -60,9 +60,10 @@
 static const uint8_t MOTOR_PINS[4] = {16, 17, 18, 19}; // ULN2003 IN1..IN4
 // DS18B20 data pin; use a 4.7k pull-up between DATA and 3.3V.
 static const uint8_t DS18B20_PIN = 4;
-static const float LOW_TEMPERATURE_LIMIT_C = 22.0f;
+static const float LOW_TEMPERATURE_LIMIT_C = 24.0f;
+static const float HIGH_TEMPERATURE_LIMIT_C = 28.0f;
 static const unsigned long TEMPERATURE_SAMPLE_MS = 2500;
-static const unsigned long LOW_TEMPERATURE_ALERT_INTERVAL_MS = 10UL * 60UL * 1000UL;
+static const unsigned long TEMPERATURE_ALERT_INTERVAL_MS = 30UL * 60UL * 1000UL;
 // 28BYJ-48 varies by gearbox. Start at 4076 halfsteps/revolution;
 // CAL_STEPS=NNNN via BLE permits adjusting after physical testing.
 uint16_t halfStepsPerRev = 4076;
@@ -119,6 +120,8 @@ unsigned long temperatureConversionStarted = 0;
 unsigned long lastTemperatureRequest = 0;
 bool lowTemperatureAlertActive = false;
 unsigned long lastLowTemperatureAlert = 0;
+bool highTemperatureAlertActive = false;
+unsigned long lastHighTemperatureAlert = 0;
 
 // ---------- Wi-Fi / clock ----------
 bool ntpConfigured = false;
@@ -136,10 +139,19 @@ String oauthAccessToken;
 unsigned long oauthExpiresAtMs = 0;
 String pendingPushEvent;
 String pendingPushText;
+struct QueuedPush {
+  String event;
+  String text;
+};
+static const uint8_t PUSH_QUEUE_CAPACITY = 8;
+QueuedPush deferredPushes[PUSH_QUEUE_CAPACITY];
+uint8_t deferredPushCount = 0;
 unsigned long pushNextAttempt = 0;
 unsigned long lastPushWifiLog = 0;
+uint32_t lastEmptyReminderEpoch = 0;
 static const unsigned long PUSH_RETRY_MS = 60000;
 static const unsigned long PUSH_WIFI_WAIT_MS = 5000;
+static const uint32_t EMPTY_REMINDER_INTERVAL_SECONDS = 60UL * 60UL;
 
 static const int LATE_GRACE_MINUTES = 30; // skip a missed meal after 30 min
 
@@ -253,6 +265,7 @@ void loadSettings() {
   rotorPosition = prefs.getUChar("position", 0);
   portionsDispensed = prefs.getUChar("portions", 0);
   awaitingReload = prefs.getBool("reload", true);
+  lastEmptyReminderEpoch = prefs.getUInt("emptyReminder", 0);
   motionInProgress = prefs.getBool("moving", false);
   halfStepsPerRev = prefs.getUShort("steps", 4076);
   if (halfStepsPerRev < 3900 || halfStepsPerRev > 4200) halfStepsPerRev = 4076;
@@ -592,16 +605,75 @@ bool deliverPush(const String& title, const String& body) {
   }
   return code == 200;
 }
-// Um evento pendente, reenviado periodicamente ate conectar.
-// Sem RTC dedicado ou fila persistente: reiniciar pode perder este aviso.
+// Fila em RAM para reenvio periodico; reiniciar pode perder eventos pendentes.
 void connectWiFiIfNeeded();
 
 void queuePush(const String& event, const String& text) {
-  pendingPushEvent = event;
-  pendingPushText = text;
-  pushNextAttempt = 0;
+  if (pendingPushEvent.isEmpty()) {
+    pendingPushEvent = event;
+    pendingPushText = text;
+    pushNextAttempt = 0;
+  } else if (pendingPushEvent == event) {
+    pendingPushText = text;
+  } else {
+    for (uint8_t i = 0; i < deferredPushCount; i++) {
+      if (deferredPushes[i].event == event) {
+        deferredPushes[i].text = text;
+        notifyPushLog(String("evento atualizado na fila: ") + event);
+        return;
+      }
+    }
+    if (deferredPushCount >= PUSH_QUEUE_CAPACITY) {
+      notifyPushLog(String("fila cheia; evento descartado: ") + event);
+      return;
+    }
+    deferredPushes[deferredPushCount].event = event;
+    deferredPushes[deferredPushCount].text = text;
+    deferredPushCount++;
+  }
   notifyPushLog(String("evento enfileirado: ") + event);
 }
+
+bool hasQueuedPush(const String& event) {
+  if (pendingPushEvent == event) return true;
+  for (uint8_t i = 0; i < deferredPushCount; i++) {
+    if (deferredPushes[i].event == event) return true;
+  }
+  return false;
+}
+
+void cancelQueuedPush(const String& event) {
+  if (pendingPushEvent == event) {
+    pendingPushEvent = "";
+    pendingPushText = "";
+    pushNextAttempt = 0;
+  }
+  for (uint8_t i = 0; i < deferredPushCount;) {
+    if (deferredPushes[i].event != event) {
+      i++;
+      continue;
+    }
+    for (uint8_t j = i + 1; j < deferredPushCount; j++) deferredPushes[j - 1] = deferredPushes[j];
+    deferredPushCount--;
+  }
+  if (pendingPushEvent.isEmpty() && deferredPushCount > 0) {
+    pendingPushEvent = deferredPushes[0].event;
+    pendingPushText = deferredPushes[0].text;
+    for (uint8_t i = 1; i < deferredPushCount; i++) deferredPushes[i - 1] = deferredPushes[i];
+    deferredPushCount--;
+    pushNextAttempt = 0;
+  }
+}
+
+void promoteNextPush() {
+  if (!pendingPushEvent.isEmpty() || deferredPushCount == 0) return;
+  pendingPushEvent = deferredPushes[0].event;
+  pendingPushText = deferredPushes[0].text;
+  for (uint8_t i = 1; i < deferredPushCount; i++) deferredPushes[i - 1] = deferredPushes[i];
+  deferredPushCount--;
+  pushNextAttempt = 0;
+}
+
 void processPush() {
   if (pendingPushEvent.isEmpty() || (int32_t)(millis() - pushNextAttempt) < 0) return;
 
@@ -620,13 +692,30 @@ void processPush() {
     return;
   }
 
+  const String deliveredEvent = pendingPushEvent;
   if (deliverPush("BettaFeeder", pendingPushText)) {
     pendingPushEvent = ""; pendingPushText = "";
+    if (deliveredEvent == "EMPTY" || deliveredEvent == "EMPTY_REMINDER") {
+      lastEmptyReminderEpoch = static_cast<uint32_t>(time(nullptr));
+      prefs.putUInt("emptyReminder", lastEmptyReminderEpoch);
+    }
     notifyPushLog("push entregue com sucesso");
+    promoteNextPush();
   } else {
     pushNextAttempt = millis() + PUSH_RETRY_MS;
     notifyPushLog(String("push falhou; nova tentativa em ") + (PUSH_RETRY_MS / 1000) + "s");
   }
+}
+
+void processEmptyLoadReminder() {
+  if (!awaitingReload || portionsDispensed < PORTIONS_PER_LOAD || !clockIsValid()) return;
+  if (hasQueuedPush("EMPTY") || hasQueuedPush("EMPTY_REMINDER")) return;
+
+  const uint32_t nowEpoch = static_cast<uint32_t>(time(nullptr));
+  if (lastEmptyReminderEpoch != 0 &&
+      static_cast<uint32_t>(nowEpoch - lastEmptyReminderEpoch) < EMPTY_REMINDER_INTERVAL_SECONDS) return;
+
+  queuePush("EMPTY_REMINDER", "O alimentador está sem porções. Reabasteça e confirme a recarga no App.");
 }
 
 void feedOnePortion(const char* source) {
@@ -778,28 +867,37 @@ void processTemperature() {
     if (measured == DEVICE_DISCONNECTED_C || !isfinite(measured)) {
       lowTemperatureAlertActive = false;
       lastLowTemperatureAlert = 0;
-      if (pendingPushEvent == "TEMPERATURA_BAIXA") {
-        pendingPushEvent = "";
-        pendingPushText = "";
-      }
+      highTemperatureAlertActive = false;
+      lastHighTemperatureAlert = 0;
+      cancelQueuedPush("TEMPERATURA_BAIXA");
+      cancelQueuedPush("TEMPERATURA_ALTA");
       return;
     }
 
     if (measured < LOW_TEMPERATURE_LIMIT_C &&
-        (!lowTemperatureAlertActive || now - lastLowTemperatureAlert >= LOW_TEMPERATURE_ALERT_INTERVAL_MS)) {
+        (!lowTemperatureAlertActive || now - lastLowTemperatureAlert >= TEMPERATURE_ALERT_INTERVAL_MS)) {
       lowTemperatureAlertActive = true;
       lastLowTemperatureAlert = now;
-      String alertText = "Temperatura da agua baixa: " + String(measured, 1) +
-        " °C. Limite: 22 °C.";
+      String alertText = "Temperatura da agua baixa: " + String(measured, 1) + " °C. Limite: 24 °C.";
       notifyBLE(String("ALERTA_TEMPERATURA: ") + alertText);
       queuePush("TEMPERATURA_BAIXA", alertText);
     } else if (measured >= LOW_TEMPERATURE_LIMIT_C) {
       lowTemperatureAlertActive = false;
       lastLowTemperatureAlert = 0;
-      if (pendingPushEvent == "TEMPERATURA_BAIXA") {
-        pendingPushEvent = "";
-        pendingPushText = "";
-      }
+      cancelQueuedPush("TEMPERATURA_BAIXA");
+    }
+
+    if (measured > HIGH_TEMPERATURE_LIMIT_C &&
+        (!highTemperatureAlertActive || now - lastHighTemperatureAlert >= TEMPERATURE_ALERT_INTERVAL_MS)) {
+      highTemperatureAlertActive = true;
+      lastHighTemperatureAlert = now;
+      String alertText = "Temperatura da agua alta: " + String(measured, 1) + " °C. Limite: 28 °C.";
+      notifyBLE(String("ALERTA_TEMPERATURA: ") + alertText);
+      queuePush("TEMPERATURA_ALTA", alertText);
+    } else if (measured <= HIGH_TEMPERATURE_LIMIT_C) {
+      highTemperatureAlertActive = false;
+      lastHighTemperatureAlert = 0;
+      cancelQueuedPush("TEMPERATURA_ALTA");
     }
   }
 
@@ -897,6 +995,10 @@ void handleCommand(String cmd) {
     // reserved for scheduled feeding times.
     portionsDispensed = 0;
     awaitingReload = false;
+    lastEmptyReminderEpoch = 0;
+    prefs.putUInt("emptyReminder", 0);
+    cancelQueuedPush("EMPTY");
+    cancelQueuedPush("EMPTY_REMINDER");
     saveSettings();
     notifyBLE("OK: recarga confirmada pelo PWA; alimentador pronto.");
   } else if (key == "CAL_STEPS") {
@@ -1111,6 +1213,7 @@ void loop() {
 
   connectWiFiIfNeeded();
   processTemperature();
+  processEmptyLoadReminder();
   processPush();
 
   if (millis() - lastStatusCheck >= 1000) {

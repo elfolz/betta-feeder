@@ -222,7 +222,9 @@ function parseDeviceMessage(message) {
 	$('temperatureStatus').textContent = temperature && temperature !== 'indisponivel'
 		? `${temperature.replace('.', ',')} °C`
 		: 'Indisponível'
-	$('temperatureStatus').classList.toggle('temperature-low', temperature !== undefined && temperature !== 'indisponivel' && Number(temperature) < 22)
+	const measuredTemperature = temperature !== undefined && temperature !== 'indisponivel' ? Number(temperature) : null
+	$('temperatureStatus').classList.toggle('temperature-low', measuredTemperature !== null &&
+		(measuredTemperature < 24 || measuredTemperature > 28))
 	const referenceLabels = { confirmada: 'Confirmada', verificar: 'Precisa ser definida' }
 	const batchLabels = { pronto: 'Pronto', aguardando_recarga: 'Aguardando recarga' }
 	$('batchStatus').textContent = `Referência: ${referenceLabels[fields.referencia] || '—'} · Lote: ${batchLabels[fields.lote] || '—'}`
