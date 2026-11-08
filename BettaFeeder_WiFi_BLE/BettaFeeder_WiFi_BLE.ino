@@ -3,7 +3,7 @@
   Wi-Fi/NTP clock; BLE configuration; 15-position carousel:
   - position 0 is the EMPTY safety pocket parked at the discharge opening
   - positions 1..14 hold the 14 portions
-  - after portion 14, the rotor advances once more to park the empty pocket
+  - after portion 14, the rotor stops at pocket 14 until refill is confirmed in the PWA
 
   Arduino IDE:
   - Board package: "esp32 by Espressif Systems"
@@ -15,9 +15,11 @@
     PASS=MyPassword
     FEED1=08:00
     FEED2=20:00
+    TIMES=08:00,20:00
     STATUS
     FEED
-    SET_HOME       // physically align empty pocket; resets the cycle counter
+    SET_HOME       // physically align empty pocket on first use or after interrupted motion
+    RELOAD         // confirm refill in the PWA; resumes without moving the motor
     CAL_STEPS=4076 // gearbox calibration; requires SET_HOME afterwards
     CLEAR_WIFI
     BLE_ON         // reativa BLE e reinicia o ESP32
@@ -27,9 +29,9 @@
 
   IMPORTANT:
   - The motor has no position sensor. SET_HOME is a manual reference operation.
-  - On every boot referenceValid starts false: verify the empty pocket and send SET_HOME.
-  - If power is lost during a movement, real rotor position may no longer match
-    the saved index. Re-align manually and send SET_HOME.
+  - A clean reboot restores the saved rotor position without moving the motor.
+  - If power is lost during a movement, the rotor position may be uncertain;
+    re-align manually and send SET_HOME before feeding resumes.
 */
 
 #include <WiFi.h>
@@ -39,6 +41,8 @@
 #include <NimBLEDevice.h>
 #include <NimBLEServer.h>
 #include <NimBLEUtils.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 #include <math.h>
 #include <memory>
 #include <cstring>
@@ -54,6 +58,10 @@
 
 // ---------- Hardware ----------
 static const uint8_t MOTOR_PINS[4] = {16, 17, 18, 19}; // ULN2003 IN1..IN4
+// DS18B20 data pin; use a 4.7k pull-up between DATA and 3.3V.
+static const uint8_t DS18B20_PIN = 4;
+static const float LOW_TEMPERATURE_LIMIT_C = 22.0f;
+static const unsigned long TEMPERATURE_SAMPLE_MS = 2500;
 // 28BYJ-48 varies by gearbox. Start at 4076 halfsteps/revolution;
 // CAL_STEPS=NNNN via BLE permits adjusting after physical testing.
 uint16_t halfStepsPerRev = 4076;
@@ -97,9 +105,18 @@ int lastFeedDate[2] = {0, 0};
 
 uint8_t rotorPosition = 0;     // 0 = empty safety pocket at outlet
 uint8_t portionsDispensed = 0; // 0..14
-bool referenceValid = false; // after any reboot, manual verify required
+bool awaitingReload = true; // fail-safe until a load is explicitly confirmed
+bool referenceValid = false; // restored after a clean reboot; cleared if motion was interrupted
 bool motionInProgress = false; // persisted before motor starts
 bool feedInProgress = false;
+bool startupScheduleChecked = false;
+OneWire oneWire(DS18B20_PIN);
+DallasTemperature temperatureSensor(&oneWire);
+float waterTemperatureC = DEVICE_DISCONNECTED_C;
+bool temperatureConversionPending = false;
+unsigned long temperatureConversionStarted = 0;
+unsigned long lastTemperatureRequest = 0;
+bool lowTemperatureAlertActive = false;
 
 // ---------- Wi-Fi / clock ----------
 bool ntpConfigured = false;
@@ -130,11 +147,12 @@ String twoDigits(int n) {
 }
 
 bool parseHHMM(const String& value, uint16_t& result) {
-  int colon = value.indexOf(':');
-  if (colon < 1) return false;
-  int h = value.substring(0, colon).toInt();
-  int m = value.substring(colon + 1).toInt();
-  if (h < 0 || h > 23 || m < 0 || m > 59) return false;
+  if (value.length() != 5 || value[2] != ':' ||
+      value[0] < '0' || value[0] > '9' || value[1] < '0' || value[1] > '9' ||
+      value[3] < '0' || value[3] > '9' || value[4] < '0' || value[4] > '9') return false;
+  int h = value.substring(0, 2).toInt();
+  int m = value.substring(3, 5).toInt();
+  if (h > 23 || m > 59) return false;
   result = (uint16_t)(h * 60 + m);
   return true;
 }
@@ -192,6 +210,8 @@ void saveSettings() {
   prefs.putInt("last2", lastFeedDate[1]);
   prefs.putUChar("position", rotorPosition);
   prefs.putUChar("portions", portionsDispensed);
+  prefs.putBool("reload", awaitingReload);
+  prefs.putBool("homed", referenceValid);
   prefs.putBool("moving", motionInProgress);
   prefs.putUShort("steps", halfStepsPerRev);
   prefs.putBool("serialMode", serialMode);
@@ -230,14 +250,22 @@ void loadSettings() {
   lastFeedDate[1] = prefs.getInt("last2", 0);
   rotorPosition = prefs.getUChar("position", 0);
   portionsDispensed = prefs.getUChar("portions", 0);
+  awaitingReload = prefs.getBool("reload", true);
   motionInProgress = prefs.getBool("moving", false);
   halfStepsPerRev = prefs.getUShort("steps", 4076);
   if (halfStepsPerRev < 3900 || halfStepsPerRev > 4200) halfStepsPerRev = 4076;
-  // Without a homing sensor, position cannot be verified across a reboot.
-  // A previous interruption during motion is especially dangerous.
-  referenceValid = false;
+  // Reuse the saved position after a clean restart. A reset during movement
+  // leaves `moving` set, so require manual alignment instead of moving at boot.
+  referenceValid = prefs.getBool("homed", false);
+  if (motionInProgress) {
+    referenceValid = false;
+    awaitingReload = true;
+  }
   if (rotorPosition >= POCKETS) rotorPosition = 0;
-  if (portionsDispensed > PORTIONS_PER_LOAD) portionsDispensed = PORTIONS_PER_LOAD;
+  if (portionsDispensed > PORTIONS_PER_LOAD) {
+    portionsDispensed = PORTIONS_PER_LOAD;
+    awaitingReload = true;
+  }
 }
 
 void releaseMotor() {
@@ -602,27 +630,33 @@ void processPush() {
 void feedOnePortion(const char* source) {
   if (feedInProgress || motionInProgress) { notifyBLE("BLOQUEADO: motor ocupado."); return; }
   if (!referenceValid) { notifyBLE("BLOQUEADO: referencia desconhecida. Confira a posicao fisica e envie SET_HOME."); return; }
-  // The count is informational only. The carousel keeps rotating whether or
-  // not food was physically reloaded after the previous 14-pocket cycle.
-  if (portionsDispensed >= PORTIONS_PER_LOAD) portionsDispensed = 0;
-  if (rotorPosition != portionsDispensed) {
+  if (awaitingReload || portionsDispensed >= PORTIONS_PER_LOAD) {
+    notifyBLE("LOTE_VAZIO: alimentador parado. Reabasteca e confirme a recarga no PWA.");
+    return;
+  }
+  const bool firstFeedAfterReload = portionsDispensed == 0 && rotorPosition == PORTIONS_PER_LOAD;
+  if (rotorPosition != portionsDispensed && !firstFeedAfterReload) {
     referenceValid = false;
+    saveSettings();
     notifyBLE("FALHA: indice inconsistente. Confira fisicamente e envie SET_HOME."); return;
   }
   feedInProgress = true;
+  // After refill at pocket 14, this scheduled feeding advances over the
+  // empty safety pocket 0 and then dispenses pocket 1. No movement occurs at
+  // refill confirmation or during boot.
+  if (firstFeedAfterReload) rotateToNextPocket();
   rotateToNextPocket();
   portionsDispensed++;
   saveSettings();
-  notifyBLE(String("ALIMENTACAO: ") + source + "; porcoes_no_ciclo=" + String(portionsDispensed) + "/14");
+  notifyBLE(String("ALIMENTACAO: ") + source + "; porcoes_no_lote=" + String(portionsDispensed) + "/14");
   queuePush("FEED_COMMANDED", "Motor acionado; dose " + String(portionsDispensed) +
             "/14. Queda da racao nao confirmada por sensor.");
   if (portionsDispensed == PORTIONS_PER_LOAD) {
-    // Park at the empty pocket, report the estimated end of food, then allow
-    // the next scheduled/manual feed to start a new rotation cycle.
-    rotateToNextPocket();
+    // Stop at pocket 14 until the owner refills and confirms through the PWA.
+    awaitingReload = true;
     saveSettings();
-    notifyBLE("RACAO_FIM_CICLO: ciclo de 14 porcoes concluido; verifique e reabasteca se necessario.");
-    queuePush("EMPTY", "Ciclo de 14 porcoes concluido. Verifique e reabasteca a racao se necessario.");
+    notifyBLE("LOTE_FINALIZADO: rotor parado apos 14 doses. Reabasteca e confirme a recarga no PWA.");
+    queuePush("EMPTY", "14 doses acionadas. O alimentador esta parado; reabasteca e confirme a recarga no PWA para retomar.");
   }
   feedInProgress = false;
 }
@@ -668,7 +702,18 @@ void processSchedule() {
   int today = dateKey(nowTm);
   int currentMinute = nowTm.tm_hour * 60 + nowTm.tm_min;
 
-  if (!referenceValid || motionInProgress) return;
+  // Do not replay meals that became due while the ESP32 was powered off.
+  // Future scheduled slots remain active as usual.
+  if (!startupScheduleChecked) {
+    for (int slot = 0; slot < 2; slot++) {
+      if (currentMinute >= feedMinute[slot]) lastFeedDate[slot] = today;
+    }
+    startupScheduleChecked = true;
+    saveSettings();
+    return;
+  }
+
+  if (!referenceValid || awaitingReload || motionInProgress) return;
   for (int slot = 0; slot < 2; slot++) {
     if (lastFeedDate[slot] == today) continue;
     if (currentMinute < feedMinute[slot]) continue;
@@ -706,12 +751,48 @@ void sendStatus() {
   s += ";feed2=" + formatHHMM(feedMinute[1]);
   s += ";posicao=" + String(rotorPosition) + "/15";
   s += ";porcoes_restantes=" + String(portionsRemaining);
-  s += ";lote=" + String(portionsDispensed >= PORTIONS_PER_LOAD ? "fim_de_ciclo" : "em_ciclo");
+  s += ";porcoes_lote=" + String(portionsDispensed) + "/14";
+  s += ";lote=" + String(awaitingReload ? "aguardando_recarga" : "pronto");
   s += ";referencia=" + String(referenceValid ? "confirmada" : "verificar");
   s += ";movimento_interrompido=" + String(motionInProgress ? "sim" : "nao");
   s += ";passos_volta=" + String(halfStepsPerRev);
   s += ";push=" + String(fcmTargetToken.isEmpty() ? "sem_destino" : "configurado");
+  s += ";temperatura=";
+  if (waterTemperatureC != DEVICE_DISCONNECTED_C && isfinite(waterTemperatureC)) {
+    s += String(waterTemperatureC, 1);
+  } else {
+    s += "indisponivel";
+  }
   notifyBLE(s);
+}
+
+void processTemperature() {
+  const unsigned long now = millis();
+  if (temperatureConversionPending) {
+    if (now - temperatureConversionStarted < 750) return;
+    float measured = temperatureSensor.getTempCByIndex(0);
+    temperatureConversionPending = false;
+    waterTemperatureC = measured;
+    if (measured == DEVICE_DISCONNECTED_C || !isfinite(measured)) return;
+
+    if (measured < LOW_TEMPERATURE_LIMIT_C && !lowTemperatureAlertActive) {
+      lowTemperatureAlertActive = true;
+      String alertText = "Temperatura da agua baixa: " + String(measured, 1) +
+        " °C. Limite: 22 °C.";
+      notifyBLE(String("ALERTA_TEMPERATURA: ") + alertText);
+      queuePush("TEMPERATURA_BAIXA", alertText);
+    } else if (measured >= LOW_TEMPERATURE_LIMIT_C) {
+      lowTemperatureAlertActive = false;
+    }
+  }
+
+  if (!temperatureConversionPending &&
+      (lastTemperatureRequest == 0 || now - lastTemperatureRequest >= TEMPERATURE_SAMPLE_MS)) {
+    lastTemperatureRequest = now;
+    temperatureSensor.requestTemperatures();
+    temperatureConversionPending = true;
+    temperatureConversionStarted = now;
+  }
 }
 
 void handleCommand(String cmd) {
@@ -753,7 +834,25 @@ void handleCommand(String cmd) {
     feedMinute[key == "FEED1" ? 0 : 1] = parsed;
     saveSettings();
     notifyBLE("OK: " + key + "=" + formatHHMM(parsed));
+  } else if (key == "TIMES") {
+    int comma = value.indexOf(',');
+    if (comma < 0 || value.indexOf(',', comma + 1) >= 0) {
+      notifyBLE("ERRO: use TIMES=08:00,20:00.");
+      return;
+    }
+    uint16_t first, second;
+    if (!parseHHMM(value.substring(0, comma), first) ||
+        !parseHHMM(value.substring(comma + 1), second) || first == second) {
+      notifyBLE("ERRO: informe dois horarios validos e diferentes (HH:MM,HH:MM).");
+      return;
+    }
+    feedMinute[0] = first;
+    feedMinute[1] = second;
+    saveSettings();
+    notifyBLE("OK: horarios salvos=" + formatHHMM(first) + "," + formatHHMM(second));
   } else if (key == "STATUS") {
+    sendStatus();
+  } else if (key == "TEMP") {
     sendStatus();
   } else if (key == "FEED") {
     feedOnePortion("MANUAL");
@@ -762,10 +861,27 @@ void handleCommand(String cmd) {
     // this command as a shortcut to bypass a physical jam.
     rotorPosition = 0;
     portionsDispensed = 0;
+    awaitingReload = true; // require explicit confirmation after loading
     referenceValid = true;
     motionInProgress = false;
     saveSettings();
-    notifyBLE("OK: posicao inicial definida.");
+    notifyBLE("OK: posicao inicial definida. Abasteca as cavidades e confirme a recarga pelo botao do PWA.");
+  } else if (key == "RELOAD") {
+    if (!awaitingReload) {
+      notifyBLE("ERRO: recarga nao solicitada pelo alimentador.");
+      return;
+    }
+    if (!referenceValid || motionInProgress ||
+        (rotorPosition != 0 && rotorPosition != PORTIONS_PER_LOAD)) {
+      notifyBLE("ERRO: referencia invalida. Alinhe fisicamente a cavidade vazia e envie SET_HOME.");
+      return;
+    }
+    // Refill confirmation only updates the load state. Motor movement is
+    // reserved for scheduled feeding times.
+    portionsDispensed = 0;
+    awaitingReload = false;
+    saveSettings();
+    notifyBLE("OK: recarga confirmada pelo PWA; alimentador pronto.");
   } else if (key == "CAL_STEPS") {
     int n = value.toInt();
     if (n < 3900 || n > 4200) { notifyBLE("ERRO: CAL_STEPS aceita 3900..4200."); return; }
@@ -822,7 +938,7 @@ void handleCommand(String cmd) {
     ntpConfigured = false;
     notifyBLE("OK: dados Wi-Fi apagados.");
   } else {
-    notifyBLE("ERRO: comando desconhecido. Use STATUS, FEED, SET_HOME, CAL_STEPS, FCM_BEGIN, FCM_ADD, FCM_SAVE, FCM_CLEAR, FCM_TEST, BLE_ON.");
+    notifyBLE("ERRO: comando desconhecido. Use STATUS, FEED, TIMES, SET_HOME, RELOAD, CAL_STEPS, FCM_BEGIN, FCM_ADD, FCM_SAVE, FCM_CLEAR, FCM_TEST, BLE_ON.");
   }
 }
 
@@ -930,6 +1046,10 @@ void setup() {
     digitalWrite(MOTOR_PINS[i], LOW);
   }
 
+  temperatureSensor.begin();
+  temperatureSensor.setResolution(10); // 187.5 ms conversion, suitable for periodic monitoring
+  temperatureSensor.setWaitForConversion(false);
+
   loadSettings();
 
   WiFi.mode(WIFI_STA);
@@ -941,7 +1061,9 @@ void setup() {
     Serial.printf("SERIAL persistente: BLE nao inicializado; heap=%u\n", ESP.getFreeHeap());
   }
 
-  notifyBLE("BettaFeeder V5: confira a referencia fisica e use SET_HOME para iniciar.");
+  notifyBLE(referenceValid
+    ? "BettaFeeder V6: posicao salva restaurada sem mover o motor."
+    : "BettaFeeder V6: alinhe a cavidade vazia e use SET_HOME; o motor permanece parado.");
   if (motionInProgress) {
     const String motionAlert = "Energia interrompida durante movimento do motor. Verifique o rotor e defina novamente a posicao inicial.";
     notifyBLE(String("ALERTA: ") + motionAlert);
@@ -971,6 +1093,7 @@ void loop() {
   if (hasCommand) handleCommand(String(localCommand));
 
   connectWiFiIfNeeded();
+  processTemperature();
   processPush();
 
   if (millis() - lastStatusCheck >= 1000) {

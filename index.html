@@ -66,15 +66,17 @@
 			</div>
 			<div class="status-grid">
 				<div class="status-item"><small>Porções restantes</small><strong id="portionsStatus">—</strong></div>
+				<div class="status-item"><small>Temperatura da água</small><strong id="temperatureStatus">—</strong></div>
 				<div class="status-item"><small>Hora do ESP32</small><strong id="clockStatus">—</strong></div>
 				<div class="status-item"><small>Wi-Fi</small><strong id="wifiStatus">—</strong></div>
 			</div>
 			<div class="status-actions">
-				<button id="testFeedButton" class="button button-danger" disabled>Testar uma porção</button>
+				<button id="testFeedButton" class="button button-danger" disabled>Alimentar agora</button>
 				<button id="homeButton" class="button button-ghost" disabled>Definir posição inicial</button>
+				<button id="reloadButton" class="button button-secondary" disabled>Confirmar recarga</button>
 			</div>
 			<p class="helper small" id="batchStatus">Referência ainda não verificada.</p>
-			<p class="helper small">Após iniciar ou reiniciar o ESP32, alinhe manualmente a cavidade vazia e defina a posição inicial. O alimentador continua o ciclo de rotação mesmo quando não há ração.</p>
+			<p class="helper small">A posição do rotor é salva a cada rotação e restaurada sem movimento após reinício. Se faltar energia durante uma rotação, alinhe manualmente a cavidade vazia e defina a posição inicial. Após 14 doses, o alimentador envia uma notificação e para; reabasteça e confirme aqui. O motor só gira ao alimentar agora ou nos horários programados.</p>
 		</section>
 
 		<section class="panel">
@@ -89,11 +91,11 @@
 			<div class="time-grid">
 				<label class="time-field">
 					<span><b class="meal-number">01</b> Primeira alimentação</span>
-					<input id="feed1" type="time" value="08:00" required disabled>
+					<input id="feed1" type="time" required disabled>
 				</label>
 				<label class="time-field">
 					<span><b class="meal-number blue">02</b> Segunda alimentação</span>
-					<input id="feed2" type="time" value="20:00" required disabled>
+					<input id="feed2" type="time" required disabled>
 				</label>
 			</div>
 			<button id="saveTimesButton" class="button button-secondary full" disabled>Enviar horários ao ESP32</button>
@@ -150,7 +152,8 @@
 			<h3 class="notification-heading">Notificações push automáticas</h3>
 			<ul class="notification-list">
 				<li><strong>Alimentação acionada</strong><span>Enviada após cada acionamento programado ou manual, exceto na 14ª porção do ciclo, quando é substituída pelo aviso de fim de ciclo. Confirma o comando do motor, não a queda da ração.</span></li>
-				<li><strong>Ciclo de 14 porções concluído</strong><span>Enviada após a 14ª porção contada. É um aviso para verificar a ração; o ESP32 não tem sensor e continua girando nos próximos horários.</span></li>
+				<li><strong>Recarga necessária</strong><span>Enviada após a 14ª dose. O ESP32 para e só retoma quando a recarga for confirmada pelo botão no PWA.</span></li>
+				<li><strong>Temperatura da água abaixo de 22 °C</strong><span>O ESP32 envia um alerta quando a leitura do DS18B20 cai abaixo de 22 °C. Um novo alerta só é enviado depois que a água voltar a 22 °C ou mais e cair novamente.</span></li>
 				<li><strong>Movimento interrompido</strong><span>Enviada ao iniciar se o ESP32 detectar que a energia foi interrompida durante o movimento. Confira o rotor e defina novamente a posição inicial.</span></li>
 				<li><strong>Horário perdido</strong><span>Enviada quando o ESP32 verifica o horário programado com mais de 30 minutos de atraso e ignora aquela alimentação.</span></li>
 			</ul>

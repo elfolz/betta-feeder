@@ -33,6 +33,7 @@ let serialReadBuffer = ''
 let toastTimer = null
 let connectionInProgress = false
 let rxFragments = ''
+let statusRefreshTimer = null
 const bleResponseWaiters = []
 
 function isConnected() {
@@ -117,6 +118,7 @@ function setConnected(connected, name = 'BettaFeeder') {
 		? (connectionMode === 'serial' ? 'Conectado via USB Serial' : 'Conectado via Bluetooth Low Energy')
 		: 'Nenhum dispositivo conectado';
 	['saveTimesButton', 'saveWifiButton', 'statusButton', 'testFeedButton', 'homeButton'].forEach(id => $(id).disabled = !connected)
+	$('reloadButton').disabled = true // enabled only after STATUS reports aguardando_recarga
 	['feed1', 'feed2', 'ssid', 'password', 'togglePassword'].forEach(id => $(id).disabled = !connected)
 	$('pushEnable').disabled = !connected
 	$('pushTest').disabled = !connected
@@ -134,6 +136,10 @@ function setConnected(connected, name = 'BettaFeeder') {
 	bluetoothButton.classList.toggle('button-danger', connected && connectionMode !== 'serial')
 	serialButton.classList.toggle('button-danger', connected && connectionMode === 'serial')
 	updatePushControl()
+	clearInterval(statusRefreshTimer)
+	statusRefreshTimer = connected ? setInterval(() => {
+		if (isConnected() && hasCommandTransport()) sendCommand('STATUS', true).catch(error => console.warn('Falha ao atualizar status:', error))
+	}, 10000) : null
 }
 
 function setConnectionLoading(loading, mode = 'bluetooth') {
@@ -166,11 +172,21 @@ function parseDeviceMessage(message) {
 		? `${dateMatch[3]}/${dateMatch[2]}/${dateMatch[1]}`
 		: fields.data
 	$('clockStatus').textContent = fields.hora && arduinoDate ? `${fields.hora} · ${arduinoDate}` : (fields.hora || '—')
-	$('portionsStatus').textContent = fields.porcoes_restantes || '—'
-	$('batchStatus').textContent = `Referência: ${fields.referencia || '—'}`
+	const batchMatch = fields.porcoes_lote?.match(/^(\d+)\/14$/)
+	const dispensed = batchMatch ? Number(batchMatch[1]) : null
+	const waitingForReload = fields.lote === 'aguardando_recarga'
+	$('portionsStatus').textContent = fields.porcoes_restantes ||
+		(dispensed !== null ? String(waitingForReload ? 0 : Math.max(0, 14 - dispensed)) : '—')
+	const temperature = fields.temperatura
+	$('temperatureStatus').textContent = temperature && temperature !== 'indisponivel'
+		? `${temperature.replace('.', ',')} °C`
+		: 'Indisponível'
+	$('temperatureStatus').classList.toggle('temperature-low', temperature !== undefined && temperature !== 'indisponivel' && Number(temperature) < 22)
+	$('batchStatus').textContent = `Referência: ${fields.referencia || '—'} · Lote: ${fields.lote || '—'}`
 	if (fields.push) $('pushState').textContent = 'Destino no ESP32: ' + fields.push
 	const ready = fields.referencia === 'confirmada'
 	$('testFeedButton').disabled = !(isConnected() && ready)
+	$('reloadButton').disabled = !(isConnected() && ready && waitingForReload)
 	if (fields.feed1) $('feed1').value = fields.feed1
 	if (fields.feed2) $('feed2').value = fields.feed2
 	if (fields.feed1 || fields.feed2) {
@@ -387,7 +403,7 @@ async function disconnect() {
 	onDisconnected()
 }
 
-async function sendCommand(command) {
+async function sendCommand(command, quiet = false) {
 	if (rxCharacteristic) {
 		// Firmware parses one command per GATT write. Write with response for reliability.
 		await rxCharacteristic.writeValueWithResponse(encoder.encode(command))
@@ -397,7 +413,7 @@ async function sendCommand(command) {
 	} else {
 		throw new Error('Conecte ao BettaFeeder primeiro.')
 	}
-	if (!command.startsWith('FCM_ADD=')) log(`Enviado: ${command}`)
+	if (!quiet && !command.startsWith('FCM_ADD=')) log(`Enviado: ${command}`)
 }
 
 async function guarded(action) {
@@ -423,10 +439,13 @@ $('saveTimesButton').addEventListener('click', () => guarded(async () => {
 	const first = $('feed1').value
 	const second = $('feed2').value
 	if (!first || !second) throw new Error('Informe os dois horários.')
+	const validTime = value => /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value)
+	if (!validTime(first) || !validTime(second)) throw new Error('Informe horários válidos no formato HH:MM.')
 	if (first === second) throw new Error('Os horários precisam ser diferentes.')
-	await sendCommand(`FEED1=${first}`)
-	await new Promise(resolve => setTimeout(resolve, 180))
-	await sendCommand(`FEED2=${second}`)
+	await sendCommandAndWait(
+		`TIMES=${first},${second}`,
+		message => message.startsWith('OK: horarios salvos=') || message.startsWith('ERRO:')
+	)
 	saveFeedTimes(first, second)
 	toast('Horários enviados ao ESP32')
 }))
@@ -455,12 +474,17 @@ $('togglePassword').addEventListener('click', () => {
 
 $('statusButton').addEventListener('click', () => guarded(() => sendCommand('STATUS')))
 $('testFeedButton').addEventListener('click', () => guarded(async () => {
-	if (!confirm('Acionar o motor e liberar uma porção agora?')) return
+	if (!confirm('Alimentar agora? O motor vai liberar uma porção imediatamente.')) return
 	await sendCommand('FEED')
 }))
 $('homeButton').addEventListener('click', () => guarded(async () => {
 	if (!confirm('Confirma que a cavidade vazia está fisicamente alinhada com a saída?')) return
 	await sendCommand('SET_HOME')
+}))
+$('reloadButton').addEventListener('click', () => guarded(async () => {
+	if (!confirm('Confirma que a recarga foi concluída? O ESP32 vai estacionar o rotor e liberar as próximas alimentações.')) return
+	await sendCommand('RELOAD')
+	await sendCommand('STATUS', true)
 }))
 $('clearLogButton').addEventListener('click', () => {
 	$('log').innerHTML = '<div class="log-empty">Os eventos de conexão e configuração aparecerão aqui.</div>'

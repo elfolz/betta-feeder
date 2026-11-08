@@ -33,6 +33,7 @@ h2{font-size:19px;letter-spacing:-.035em;margin:0;font-weight:700}
 .button{border:0;border-radius:11px;padding:12px 15px;font-weight:800;font-size:12px;transition:transform .15s,filter .15s,opacity .15s}
 .button:hover:not(:disabled){filter:brightness(1.08);transform:translateY(-1px)}
 .button:disabled{opacity:.38;cursor:not-allowed}
+button:disabled{background:#34383e;color:#858d97;border-color:#41464e;opacity:1;box-shadow:none;cursor:not-allowed}
 .button-primary{color:#071b16;background:var(--mint);box-shadow:0 5px 22px rgba(0,255,185,.12)}
 .connect-spinner{display:none;width:13px;height:13px;border:2px solid rgba(7,27,22,.28);border-top-color:#071b16;border-radius:50%;animation:connect-spin .7s linear infinite;vertical-align:-2px;margin-right:7px}
 .button-primary.is-loading .connect-spinner,.button-secondary.is-loading .connect-spinner{display:inline-block}
@@ -48,6 +49,7 @@ h2{font-size:19px;letter-spacing:-.035em;margin:0;font-weight:700}
 .time-field>span,.input-field>span{font-size:12px;color:#c4cbd3;font-weight:600}
 .meal-number{font:11px 'DM Mono',monospace;color:var(--mint);margin-right:7px}.meal-number.blue{color:#7795ff}
 input{width:100%;min-width:0;background:#111316;border:1px solid #373d45;color:var(--text);border-radius:10px;padding:13px 12px;outline:none;accent-color:var(--mint);font-size:14px}
+input:disabled,textarea:disabled,select:disabled{background:#34383e;color:#858d97;border-color:#41464e;opacity:1;cursor:not-allowed}
 input:focus{border-color:var(--mint);box-shadow:0 0 0 3px rgba(0,255,185,.08)}
 input[type=time]{font:18px 'DM Mono',monospace}
 input::placeholder{color:#626b76;font-size:12px}
@@ -58,12 +60,13 @@ input::placeholder{color:#626b76;font-size:12px}
 .visibility-button{position:absolute;right:8px;top:50%;transform:translateY(-50%);border:0;background:transparent;color:var(--mint);font-size:11px;font-weight:700;padding:8px}
 .privacy-note{display:flex;align-items:center;gap:7px;color:#808a96;font-size:10px;line-height:1.5;margin:15px 0 0}
 .privacy-note svg{width:14px;height:14px;stroke:var(--mint);fill:none;stroke-width:1.7;flex:none}
-.status-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.status-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden}
 .status-item{background:#17191d;padding:14px;min-width:0}
 .status-item small{display:block;color:var(--muted);font-size:10px;margin-bottom:7px}
 .status-item strong{font:13px 'DM Mono',monospace;color:#e7ebef}
 .status-item strong{overflow-wrap:anywhere}
-.status-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
+.status-item strong.temperature-low{color:#ff9299}
+.status-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:14px}
 .small{font-size:11px;margin-top:13px}
 .notification-heading{font-size:12px;margin:20px 0 8px;color:#dbe0e6}
 .notification-list{list-style:none;padding:0;margin:0;display:grid;gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden}
@@ -85,4 +88,4 @@ footer{display:flex;justify-content:space-between;gap:10px;color:#5e6873;font:9p
 .toast{position:fixed;left:50%;bottom:22px;transform:translate(-50%,20px);opacity:0;pointer-events:none;background:#e8fff8;color:#08251d;border-radius:10px;padding:12px 16px;font-size:12px;font-weight:700;box-shadow:0 10px 35px #0008;transition:.2s;max-width:calc(100% - 32px);z-index:5}
 .toast.show{opacity:1;transform:translate(-50%,0)}
 @media(max-width:560px){.app-shell{width:min(100% - 24px,760px);padding-top:14px}.topbar{margin-bottom:38px}.panel{padding:18px}.device-row{flex-wrap:wrap}.device-copy{min-width:calc(100% - 70px)}.device-row .button{width:100%}.time-grid{grid-template-columns:1fr}.status-actions{grid-template-columns:1fr}footer{flex-direction:column}}
-@media(max-width:560px){.status-item{padding:9px 7px}.status-item small{font-size:9px}.status-item strong{font-size:11px}.wifi-grid{gap:8px}.wifi-grid .input-field>span{font-size:10px}.wifi-grid .password-wrap input{padding-right:58px}.wifi-grid .visibility-button{right:2px;padding:6px 4px;font-size:10px}}
+@media(max-width:560px){.status-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.status-item{padding:9px 7px}.status-item small{font-size:9px}.status-item strong{font-size:11px}.wifi-grid{gap:8px}.wifi-grid .input-field>span{font-size:10px}.wifi-grid .password-wrap input{padding-right:58px}.wifi-grid .visibility-button{right:2px;padding:6px 4px;font-size:10px}}
