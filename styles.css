@@ -398,7 +398,8 @@ button.button-primary:disabled.is-loading .connect-spinner {
 	color: #7795ff
 }
 
-input {
+input,
+textarea {
 	width: 100%;
 	min-width: 0;
 	background: #111316;
@@ -411,6 +412,14 @@ input {
 	font-size: 14px
 }
 
+textarea {
+	min-height: 120px;
+	resize: vertical;
+	font: 12px 'DM Mono', monospace;
+	line-height: 1.5;
+	overflow-wrap: anywhere
+}
+
 input:disabled,
 textarea:disabled,
 select:disabled {
@@ -421,7 +430,8 @@ select:disabled {
 	cursor: not-allowed
 }
 
-input:focus {
+input:focus,
+textarea:focus {
 	border-color: var(--mint);
 	box-shadow: 0 0 0 3px rgba(0, 255, 185, .08)
 }
@@ -430,7 +440,8 @@ input[type=time] {
 	font: 18px 'DM Mono', monospace
 }
 
-input::placeholder {
+input::placeholder,
+textarea::placeholder {
 	color: #626b76;
 	font-size: 12px
 }
@@ -542,6 +553,93 @@ input::placeholder {
 	font-size: 12px;
 	margin: 20px 0 8px;
 	color: #dbe0e6
+}
+
+.notification-toggle-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 18px;
+	padding: 16px;
+	margin-top: 14px;
+	border: 1px solid var(--line);
+	border-radius: 14px;
+	background: rgba(255, 255, 255, .025)
+}
+
+.notification-toggle-copy {
+	display: flex;
+	flex-direction: column;
+	gap: 4px
+}
+
+.notification-toggle-copy strong {
+	font-size: 14px
+}
+
+.notification-toggle-copy small {
+	color: var(--muted);
+	font-size: 12px
+}
+
+.toggle-switch {
+	position: relative;
+	width: 54px;
+	height: 30px;
+	flex: none
+}
+
+.toggle-switch input {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: 0;
+	opacity: 0
+}
+
+#notificationDetails[hidden] {
+	display: none
+}
+
+.toggle-track {
+	position: absolute;
+	inset: 0;
+	border: 1px solid #4a515a;
+	border-radius: 99px;
+	background: #30353b;
+	cursor: pointer;
+	transition: background .18s ease, border-color .18s ease
+}
+
+.toggle-track::before {
+	position: absolute;
+	left: 3px;
+	top: 3px;
+	width: 22px;
+	height: 22px;
+	border-radius: 50%;
+	background: #f3f5f7;
+	content: '';
+	transition: transform .18s ease
+}
+
+.toggle-switch input:checked + .toggle-track {
+	border-color: var(--mint);
+	background: rgba(0, 255, 185, .32)
+}
+
+.toggle-switch input:checked + .toggle-track::before {
+	transform: translateX(24px);
+	background: var(--mint)
+}
+
+.toggle-switch input:focus-visible + .toggle-track {
+	box-shadow: 0 0 0 3px rgba(0, 255, 185, .2)
+}
+
+.toggle-switch input:disabled + .toggle-track {
+	cursor: not-allowed;
+	opacity: .55
 }
 
 .notification-list {

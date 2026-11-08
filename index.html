@@ -38,7 +38,8 @@
 			</div>
 			<div class="device-row">
 				<div class="device-icon"><svg viewBox="0 0 24 24" aria-hidden="true">
-						<path d="M7 7l10 10-5 5V2l5 5L7 17" />
+						<rect x="5" y="5" width="14" height="14" rx="3" />
+						<path d="M9 9h6v6H9zM9 1v4m6-4v4M9 19v4m6-4v4M1 9h4m-4 6h4m14-6h4m-4 6h4" />
 					</svg></div>
 				<div class="device-copy">
 					<strong id="deviceName">BettaFeeder</strong>
@@ -139,25 +140,57 @@
 			<div class="card-heading">
 				<div>
 					<div class="section-kicker">NOTIFICAÇÕES</div>
-					<h2>Ative as notificações do BettaFeeder</h2>
+					<h2>Notificações do BettaFeeder</h2>
 				</div>
 			</div>
-			<p class="helper">Permita o envio de notificações para receber alertas do alimentador.</p>
-			<p class="helper small" id="pushState" aria-live="polite"></p>
-			<div class="status-actions">
-				<button id="pushEnable" class="button button-primary" disabled><span class="connect-spinner" aria-hidden="true"></span><span class="push-button-label">Ativar notificações</span></button>
-				<button id="pushTest" class="button button-ghost" disabled>Testar notificação</button>
+			<div class="notification-toggle-row">
+				<div class="notification-toggle-copy">
+					<strong>Notificações push</strong>
+					<small id="pushToggleLabel">Desativadas neste dispositivo</small>
+				</div>
+				<label class="toggle-switch">
+					<input id="pushToggle" type="checkbox" role="switch" aria-label="Ativar notificações push" aria-describedby="pushState" disabled>
+					<span class="toggle-track" aria-hidden="true"></span>
+				</label>
 			</div>
-			<h3 class="notification-heading">Notificações push automáticas</h3>
-			<ul class="notification-list">
+			<p class="helper small" id="pushState" aria-live="polite"></p>
+			<div id="notificationDetails" hidden>
+				<div class="status-actions">
+				<button id="pushTest" class="button button-ghost" disabled>Testar notificação</button>
+				</div>
+				<h3 class="notification-heading">Credenciais FCM do ESP32</h3>
+				<p class="helper small" id="firebaseConfigState" aria-live="polite">Conecte ao ESP32 para consultar a configuração.</p>
+				<form id="firebaseConfigForm" autocomplete="off">
+				<label class="input-field">
+					<span>ID do projeto Firebase</span>
+					<input id="firebaseProjectId" type="text" maxlength="30" placeholder="meu-projeto-firebase" autocomplete="off" disabled required>
+				</label>
+				<label class="input-field">
+					<span>E-mail da conta de serviço</span>
+					<input id="firebaseClientEmail" type="email" maxlength="160" placeholder="firebase-adminsdk@projeto.iam.gserviceaccount.com" autocomplete="off" disabled required>
+				</label>
+				<label class="input-field">
+					<span>Chave privada da conta de serviço (PEM)</span>
+					<textarea id="firebasePrivateKey" rows="5" maxlength="1900" placeholder="Cole o campo private_key do JSON da conta de serviço. Deixe vazio para manter a chave já salva." autocomplete="off" spellcheck="false" disabled></textarea>
+				</label>
+			<p class="helper small">O ID do projeto deve corresponder ao projeto configurado em <code>firebase-config.js</code>.</p>
+			<p class="privacy-note"><svg viewBox="0 0 24 24" aria-hidden="true">
+					<rect x="5" y="10" width="14" height="11" rx="2" />
+					<path d="M8 10V7a4 4 0 0 1 8 0v3" />
+				</svg> A chave privada não fica salva no PWA. Ela é enviada por BLE criptografado (sem proteção contra intermediário) ou USB Serial e armazenada na NVS do ESP32; acesso físico ao dispositivo pode expô-la.</p>
+				<button id="saveFirebaseConfigButton" class="button button-secondary full" type="submit" disabled>Salvar credenciais no ESP32</button>
+			</form>
+				<h3 class="notification-heading">Notificações push automáticas</h3>
+				<ul class="notification-list">
 				<li><strong>Alimentação acionada</strong><span>Enviada após cada acionamento programado ou manual, exceto na 14ª porção do ciclo, quando é substituída pelo aviso de fim de ciclo. Confirma o comando do motor, não a queda da ração.</span></li>
 				<li><strong>Recarga necessária</strong><span>O ESP32 envia esta notificação após a 14ª porção e volta a enviá-la a cada hora até a recarga ser confirmada pelo botão no PWA. O alimentador permanece parado nesse período.</span></li>
 				<li><strong>Temperatura da água abaixo de 24 °C</strong><span>Quando o DS18B20 consegue fazer a leitura e a água está abaixo de 24 °C, o ESP32 envia um alerta e repete a notificação a cada 30 minutos. A repetição para quando a leitura chegar a 24 °C ou mais.</span></li>
 				<li><strong>Temperatura da água acima de 28 °C</strong><span>Quando o DS18B20 consegue fazer a leitura e a água está acima de 28 °C, o ESP32 envia um alerta e repete a notificação a cada 30 minutos. A repetição para quando a leitura chegar a 28 °C ou menos.</span></li>
 				<li><strong>Movimento interrompido</strong><span>Enviada ao iniciar se o ESP32 detectar que a energia foi interrompida durante o movimento. Confira o rotor e defina novamente a posição inicial.</span></li>
 				<li><strong>Horário perdido</strong><span>Enviada quando o ESP32 verifica o horário programado com mais de 30 minutos de atraso e ignora aquela alimentação.</span></li>
-			</ul>
-			<p class="helper small">Os avisos de horário perdido e movimento interrompido também aparecem no log se o PWA estiver conectado por Bluetooth ou USB. O envio de push precisa de permissão no navegador, destino FCM configurado, Wi-Fi e horário NTP válido. Se a rede ou o horário ainda não estiverem disponíveis, o ESP32 tenta enviar depois.</p>
+				</ul>
+				<p class="helper small">Os avisos de horário perdido e movimento interrompido também aparecem no log se o PWA estiver conectado por Bluetooth ou USB. O envio de push precisa de permissão no navegador, destino FCM configurado, Wi-Fi e horário NTP válido. Se a rede ou o horário ainda não estiverem disponíveis, o ESP32 tenta enviar depois.</p>
+			</div>
 		</section>
 
 		<section class="log-panel">
@@ -188,7 +221,7 @@
 	<script src="./firebase-config.js" defer></script>
 	<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js" defer></script>
 	<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-compat.js" defer></script>
-	<script src="./app.js?v=24" defer></script>
+	<script src="./app.js?v=29" defer></script>
 </body>
 
 </html>

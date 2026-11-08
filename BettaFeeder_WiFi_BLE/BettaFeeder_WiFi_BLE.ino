@@ -54,7 +54,6 @@
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/version.h>
-#include "firebase_secrets.h"
 
 // ---------- Hardware ----------
 static const uint8_t MOTOR_PINS[4] = {16, 17, 18, 19}; // ULN2003 IN1..IN4
@@ -135,6 +134,16 @@ unsigned long wifiAttemptStarted = 0;
 String fcmTargetToken;
 String pendingFcmToken;
 size_t expectedFcmLength = 0;
+String firebaseProjectId;
+String firebaseClientEmail;
+String firebasePrivateKey;
+String pendingFirebaseProjectId;
+String pendingFirebaseClientEmail;
+String pendingFirebasePrivateKey;
+size_t expectedFirebaseProjectLength = 0;
+size_t expectedFirebaseEmailLength = 0;
+size_t expectedFirebasePrivateKeyLength = 0;
+bool firebaseConfigEditing = false;
 String oauthAccessToken;
 unsigned long oauthExpiresAtMs = 0;
 String pendingPushEvent;
@@ -256,6 +265,9 @@ void loadSettings() {
   prefs.begin("bettafeed", false);
   wifiSSID = prefs.getString("ssid", "");
   fcmTargetToken = prefs.getString("fcmToken", "");
+  firebaseProjectId = prefs.getString("fbProject", "");
+  firebaseClientEmail = prefs.getString("fbEmail", "");
+  firebasePrivateKey = prefs.getString("fbKey", "");
   serialMode = prefs.getBool("serialMode", false);
   wifiPASS = prefs.getString("pass", "");
   feedMinute[0] = prefs.getUShort("feed1", 8 * 60);
@@ -364,15 +376,15 @@ String jsonEscape(const String& s) {
   return o;
 }
 bool firebaseConfigured() {
-  return String(FIREBASE_PROJECT_ID) != "COLOQUE_PROJECT_ID" &&
-         String(FIREBASE_CLIENT_EMAIL) != "COLOQUE_CLIENT_EMAIL" &&
-         strstr(FIREBASE_PRIVATE_KEY, "COLE_AQUI") == nullptr;
+  return !firebaseProjectId.isEmpty() && firebaseClientEmail.indexOf('@') > 0 &&
+         firebasePrivateKey.indexOf("-----BEGIN PRIVATE KEY-----") >= 0 &&
+         firebasePrivateKey.indexOf("-----END PRIVATE KEY-----") >= 0;
 }
 String signedJwt() {
   if (!firebaseConfigured() || !clockIsValid()) return "";
   time_t now = time(nullptr);
   String header = "{\"alg\":\"RS256\",\"typ\":\"JWT\"}";
-  String claims = "{\"iss\":\"" + jsonEscape(FIREBASE_CLIENT_EMAIL) +
+  String claims = "{\"iss\":\"" + jsonEscape(firebaseClientEmail) +
     "\",\"scope\":\"https://www.googleapis.com/auth/firebase.messaging\",\"aud\":\"https://oauth2.googleapis.com/token\",\"iat\":" +
     String((uint32_t)now) + ",\"exp\":" + String((uint32_t)(now + 3500)) + "}";
   String input = b64urlText(header) + "." + b64urlText(claims);
@@ -385,8 +397,7 @@ String signedJwt() {
 #endif
   mbedtls_pk_context pk;
   mbedtls_pk_init(&pk);
-  String privateKey = FIREBASE_PRIVATE_KEY;
-  privateKey.replace("\\n", "\n");
+  firebasePrivateKey.replace("\\n", "\n");
   mbedtls_entropy_context entropy;
   mbedtls_entropy_init(&entropy);
   mbedtls_ctr_drbg_context rng;
@@ -396,12 +407,12 @@ String signedJwt() {
                         (const unsigned char*)personal, strlen(personal));
   if (rc == 0) {
 #if MBEDTLS_VERSION_MAJOR >= 3
-    rc = mbedtls_pk_parse_key(&pk, (const unsigned char*)privateKey.c_str(),
-           privateKey.length() + 1, nullptr, 0,
+    rc = mbedtls_pk_parse_key(&pk, (const unsigned char*)firebasePrivateKey.c_str(),
+           firebasePrivateKey.length() + 1, nullptr, 0,
            mbedtls_ctr_drbg_random, &rng);
 #else
-    rc = mbedtls_pk_parse_key(&pk, (const unsigned char*)privateKey.c_str(),
-           privateKey.length() + 1, nullptr, 0);
+    rc = mbedtls_pk_parse_key(&pk, (const unsigned char*)firebasePrivateKey.c_str(),
+           firebasePrivateKey.length() + 1, nullptr, 0);
 #endif
   }
   unsigned char signature[512];
@@ -559,7 +570,7 @@ bool deliverPush(const String& title, const String& body) {
   configureTlsClient(secure);
   HTTPClient http;
   http.setTimeout(12000);
-  String url = "https://fcm.googleapis.com/v1/projects/" + String(FIREBASE_PROJECT_ID) + "/messages:send";
+  String url = "https://fcm.googleapis.com/v1/projects/" + firebaseProjectId + "/messages:send";
   if (!http.begin(secure, url)) {
     notifyPushLog("FCM: falha ao abrir conexao TLS");
     return false;
@@ -848,6 +859,9 @@ void sendStatus() {
   s += ";movimento_interrompido=" + String(motionInProgress ? "sim" : "nao");
   s += ";passos_volta=" + String(halfStepsPerRev);
   s += ";push=" + String(fcmTargetToken.isEmpty() ? "sem_destino" : "configurado");
+  s += ";firebase=" + String(firebaseConfigured() ? "configurado" : "incompleto");
+  s += ";fb_project=" + firebaseProjectId;
+  s += ";fb_email=" + firebaseClientEmail;
   s += ";temperatura=";
   if (waterTemperatureC != DEVICE_DISCONNECTED_C && isfinite(waterTemperatureC)) {
     s += String(waterTemperatureC, 1);
@@ -1001,6 +1015,134 @@ void handleCommand(String cmd) {
     cancelQueuedPush("EMPTY_REMINDER");
     saveSettings();
     notifyBLE("OK: recarga confirmada pelo PWA; alimentador pronto.");
+  } else if (key == "FB_BEGIN") {
+    pendingFirebaseProjectId = firebaseProjectId;
+    pendingFirebaseClientEmail = firebaseClientEmail;
+    pendingFirebasePrivateKey = firebasePrivateKey;
+    expectedFirebaseProjectLength = 0;
+    expectedFirebaseEmailLength = 0;
+    expectedFirebasePrivateKeyLength = 0;
+    firebaseConfigEditing = true;
+    notifyBLE("OK: FB_BEGIN");
+  } else if (key == "PRJ_BEGIN") {
+    const long fieldLength = value.toInt();
+    if (!firebaseConfigEditing || fieldLength < 6 || fieldLength > 30) {
+      notifyBLE("ERRO: tamanho do ID do projeto invalido.");
+      return;
+    }
+    expectedFirebaseProjectLength = (size_t)fieldLength;
+    pendingFirebaseProjectId = "";
+    pendingFirebaseProjectId.reserve(expectedFirebaseProjectLength + 1);
+    notifyBLE("OK: PRJ_BEGIN");
+  } else if (key == "PRJ_ADD") {
+    if (!firebaseConfigEditing || expectedFirebaseProjectLength == 0 || value.isEmpty() ||
+        pendingFirebaseProjectId.length() + value.length() > expectedFirebaseProjectLength) {
+      notifyBLE("ERRO: fragmento do ID do projeto invalido.");
+      return;
+    }
+    pendingFirebaseProjectId += value;
+  } else if (key == "PRJ_SAVE") {
+    if (!firebaseConfigEditing || expectedFirebaseProjectLength == 0 ||
+        pendingFirebaseProjectId.length() != expectedFirebaseProjectLength) {
+      notifyBLE("ERRO: ID do projeto incompleto.");
+      return;
+    }
+    if (pendingFirebaseProjectId[0] < 'a' || pendingFirebaseProjectId[0] > 'z' ||
+        !((pendingFirebaseProjectId[pendingFirebaseProjectId.length() - 1] >= 'a' && pendingFirebaseProjectId[pendingFirebaseProjectId.length() - 1] <= 'z') ||
+          (pendingFirebaseProjectId[pendingFirebaseProjectId.length() - 1] >= '0' && pendingFirebaseProjectId[pendingFirebaseProjectId.length() - 1] <= '9'))) {
+      notifyBLE("ERRO: formato do ID do projeto invalido.");
+      return;
+    }
+    for (size_t i = 0; i < pendingFirebaseProjectId.length(); i++) {
+      const char c = pendingFirebaseProjectId[i];
+      if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) {
+        notifyBLE("ERRO: ID do projeto deve usar letras minusculas, numeros e hifens.");
+        return;
+      }
+    }
+    expectedFirebaseProjectLength = 0;
+    notifyBLE("OK: PRJ_SAVE");
+  } else if (key == "EML_BEGIN") {
+    const long fieldLength = value.toInt();
+    if (!firebaseConfigEditing || fieldLength < 20 || fieldLength > 160) {
+      notifyBLE("ERRO: tamanho do e-mail invalido.");
+      return;
+    }
+    expectedFirebaseEmailLength = (size_t)fieldLength;
+    pendingFirebaseClientEmail = "";
+    pendingFirebaseClientEmail.reserve(expectedFirebaseEmailLength + 1);
+    notifyBLE("OK: EML_BEGIN");
+  } else if (key == "EML_ADD") {
+    if (!firebaseConfigEditing || expectedFirebaseEmailLength == 0 || value.isEmpty() ||
+        pendingFirebaseClientEmail.length() + value.length() > expectedFirebaseEmailLength) {
+      notifyBLE("ERRO: fragmento do e-mail invalido.");
+      return;
+    }
+    pendingFirebaseClientEmail += value;
+  } else if (key == "EML_SAVE") {
+    if (!firebaseConfigEditing || expectedFirebaseEmailLength == 0 ||
+        pendingFirebaseClientEmail.length() != expectedFirebaseEmailLength ||
+        pendingFirebaseClientEmail.indexOf('@') <= 0 ||
+        !pendingFirebaseClientEmail.endsWith(".iam.gserviceaccount.com")) {
+      notifyBLE("ERRO: e-mail da conta de servico invalido.");
+      return;
+    }
+    expectedFirebaseEmailLength = 0;
+    notifyBLE("OK: EML_SAVE");
+  } else if (key == "PK_BEGIN") {
+    const long keyLength = value.toInt();
+    if (!firebaseConfigEditing || keyLength < 300 || keyLength > 1900) {
+      notifyBLE("ERRO: tamanho da chave privada invalido.");
+      return;
+    }
+    expectedFirebasePrivateKeyLength = (size_t)keyLength;
+    pendingFirebasePrivateKey = "";
+    pendingFirebasePrivateKey.reserve(expectedFirebasePrivateKeyLength + 1);
+    notifyBLE("OK: PK_BEGIN");
+  } else if (key == "PK_ADD") {
+    if (!firebaseConfigEditing || expectedFirebasePrivateKeyLength == 0 || value.isEmpty() ||
+        pendingFirebasePrivateKey.length() + value.length() > expectedFirebasePrivateKeyLength) {
+      notifyBLE("ERRO: fragmento da chave privada invalido.");
+      return;
+    }
+    pendingFirebasePrivateKey += value;
+  } else if (key == "PK_SAVE") {
+    if (!firebaseConfigEditing || expectedFirebasePrivateKeyLength == 0 ||
+        pendingFirebasePrivateKey.length() != expectedFirebasePrivateKeyLength ||
+        pendingFirebasePrivateKey.indexOf("-----BEGIN PRIVATE KEY-----") < 0 ||
+        pendingFirebasePrivateKey.indexOf("-----END PRIVATE KEY-----") < 0) {
+      notifyBLE("ERRO: chave privada incompleta ou formato invalido.");
+      return;
+    }
+    expectedFirebasePrivateKeyLength = 0;
+    notifyBLE("OK: PK_SAVE");
+  } else if (key == "FB_SAVE") {
+    if (!firebaseConfigEditing || pendingFirebaseProjectId.isEmpty() ||
+        pendingFirebaseClientEmail.isEmpty() ||
+        pendingFirebasePrivateKey.indexOf("-----BEGIN PRIVATE KEY-----") < 0 ||
+        pendingFirebasePrivateKey.indexOf("-----END PRIVATE KEY-----") < 0) {
+      notifyBLE("ERRO: credenciais Firebase incompletas.");
+      return;
+    }
+    if (!prefs.putString("fbProject", pendingFirebaseProjectId) ||
+        !prefs.putString("fbEmail", pendingFirebaseClientEmail) ||
+        !prefs.putString("fbKey", pendingFirebasePrivateKey) ||
+        prefs.getString("fbProject", "") != pendingFirebaseProjectId ||
+        prefs.getString("fbEmail", "") != pendingFirebaseClientEmail ||
+        prefs.getString("fbKey", "") != pendingFirebasePrivateKey) {
+      notifyBLE("ERRO: nao foi possivel salvar as credenciais Firebase.");
+      return;
+    }
+    firebaseProjectId = pendingFirebaseProjectId;
+    firebaseClientEmail = pendingFirebaseClientEmail;
+    firebasePrivateKey = pendingFirebasePrivateKey;
+    oauthAccessToken = "";
+    oauthExpiresAtMs = 0;
+    firebaseConfigEditing = false;
+    pendingFirebaseProjectId = "";
+    pendingFirebaseClientEmail = "";
+    pendingFirebasePrivateKey = "";
+    notifyBLE("OK: credenciais Firebase salvas.");
   } else if (key == "CAL_STEPS") {
     int n = value.toInt();
     if (n < 3900 || n > 4200) { notifyBLE("ERRO: CAL_STEPS aceita 3900..4200."); return; }
@@ -1057,7 +1199,7 @@ void handleCommand(String cmd) {
     ntpConfigured = false;
     notifyBLE("OK: dados Wi-Fi apagados.");
   } else {
-    notifyBLE("ERRO: comando desconhecido. Use STATUS, FEED, TIMES, SET_HOME, RELOAD, CAL_STEPS, FCM_BEGIN, FCM_ADD, FCM_SAVE, FCM_CLEAR, FCM_TEST, BLE_ON.");
+    notifyBLE("ERRO: comando desconhecido. Use STATUS, FEED, TIMES, SET_HOME, RELOAD, FCM_*, FB_BEGIN, PRJ_*, EML_*, PK_*, FB_SAVE, BLE_ON.");
   }
 }
 
@@ -1125,6 +1267,7 @@ static RxCallbacks rxCallbacks;
 
 void startBLE() {
   NimBLEDevice::init(BLE_DEVICE_NAME);
+  NimBLEDevice::setSecurityAuth(true, false, true);
   // O protocolo usa fragmentos de 18 bytes e funciona com MTU 23. Nao
   // solicite MTU 247, pois isso aumenta o consumo de memoria do BLE.
   NimBLEDevice::setMTU(23);
@@ -1138,7 +1281,7 @@ void startBLE() {
   );
 
   NimBLECharacteristic* rx = service->createCharacteristic(
-    RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
+    RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_ENC
   );
   rx->setCallbacks(rxCallbacks);
 

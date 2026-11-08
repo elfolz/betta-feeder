@@ -8,18 +8,8 @@ const BLE = {
 const $ = (id) => document.getElementById(id)
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
-try {
-	$('ssid').value = localStorage.getItem('bettafeeder.ssid') || ''
-	const savedFeedTimes = JSON.parse(localStorage.getItem('bettafeeder.feedTimes') || 'null')
-	if (/^\d{2}:\d{2}$/.test(savedFeedTimes?.feed1 || '')) $('feed1').value = savedFeedTimes.feed1
-	if (/^\d{2}:\d{2}$/.test(savedFeedTimes?.feed2 || '')) $('feed2').value = savedFeedTimes.feed2
-} catch (_) { }
+try { localStorage.clear() } catch (_) { }
 
-function saveFeedTimes(first, second) {
-	try {
-		localStorage.setItem('bettafeeder.feedTimes', JSON.stringify({ feed1: first, feed2: second }))
-	} catch (_) { }
-}
 let device = null
 let server = null
 let rxCharacteristic = null
@@ -35,6 +25,7 @@ let connectionInProgress = false
 let rxFragments = ''
 let statusRefreshTimer = null
 let feedReferenceReady = false
+let feedTimesReceived = false
 const bleResponseWaiters = []
 
 function isConnected() {
@@ -126,6 +117,7 @@ function errorMessage(error, fallback = 'Ocorreu um erro ao conectar ao Bluetoot
 }
 
 function setConnected(connected, name = 'BettaFeeder') {
+	if (!connected) feedTimesReceived = false
 	const badge = $('connectionBadge')
 	badge.classList.toggle('online', connected)
 	badge.classList.toggle('offline', !connected)
@@ -134,19 +126,22 @@ function setConnected(connected, name = 'BettaFeeder') {
 	$('deviceDescription').textContent = connected
 		? (connectionMode === 'serial' ? 'Conectado via USB Serial' : 'Conectado via Bluetooth Low Energy')
 		: 'Nenhum dispositivo conectado';
-	$('saveTimesButton').disabled = !connected
+	$('saveTimesButton').disabled = !connected || !feedTimesReceived
 	$('saveWifiButton').disabled = !connected
 	$('statusButton').disabled = !connected
 	updateFeedButtonAvailability()
 	$('homeButton').disabled = !connected
 	$('reloadButton').disabled = true // enabled only after STATUS reports aguardando_recarga
-	$('feed1').disabled = !connected
-	$('feed2').disabled = !connected
+	$('feed1').disabled = !connected || !feedTimesReceived
+	$('feed2').disabled = !connected || !feedTimesReceived
 	$('ssid').disabled = !connected
 	$('password').disabled = !connected
 	$('togglePassword').disabled = !connected
-	$('pushEnable').disabled = !connected
 	$('pushTest').disabled = !connected
+	$('firebaseProjectId').disabled = !connected
+	$('firebaseClientEmail').disabled = !connected
+	$('firebasePrivateKey').disabled = !connected
+	$('saveFirebaseConfigButton').disabled = !connected
 	const bluetoothButton = $('connectButton')
 	const serialButton = $('serialConnectButton')
 	const serialActive = connected && connectionMode === 'serial'
@@ -232,15 +227,28 @@ function parseDeviceMessage(message) {
 		const pushLabels = { configurado: 'Configurado', sem_destino: 'Sem destino configurado' }
 		$('pushState').textContent = 'Destino no ESP32: ' + (pushLabels[fields.push] || 'Estado desconhecido')
 	}
+	if (fields.firebase) {
+		$('firebaseConfigState').textContent = fields.firebase === 'configurado'
+			? 'Credenciais FCM configuradas no ESP32.'
+			: 'Credenciais FCM ainda não configuradas no ESP32.'
+	}
+	if (Object.hasOwn(fields, 'fb_project')) {
+		$('firebaseProjectId').value = fields.fb_project
+	}
+	if (Object.hasOwn(fields, 'fb_email')) {
+		$('firebaseClientEmail').value = fields.fb_email
+	}
+	if (Object.hasOwn(fields, 'ssid')) $('ssid').value = fields.ssid
 	const ready = fields.referencia === 'confirmada'
 	feedReferenceReady = ready
 	updateFeedButtonAvailability()
 	$('reloadButton').disabled = !(isConnected() && ready && waitingForReload)
-	if (fields.feed1) $('feed1').value = fields.feed1
-	if (fields.feed2) $('feed2').value = fields.feed2
-	if (fields.feed1 || fields.feed2) {
-		saveFeedTimes(fields.feed1 || $('feed1').value, fields.feed2 || $('feed2').value)
-	}
+	$('feed1').value = fields.feed1 || ''
+	$('feed2').value = fields.feed2 || ''
+	feedTimesReceived = Boolean(fields.feed1 && fields.feed2)
+	$('feed1').disabled = !isConnected() || !feedTimesReceived
+	$('feed2').disabled = !isConnected() || !feedTimesReceived
+	$('saveTimesButton').disabled = !isConnected() || !feedTimesReceived
 }
 
 function onNotification(event) {
@@ -299,55 +307,60 @@ async function connectSerial() {
 	try {
 		if (!('serial' in navigator)) throw new Error('Web Serial não está disponível. Use Chrome ou Edge em HTTPS/localhost.')
 		log('Selecione a porta USB Serial do ESP32...')
-		await attachSerialPort(await navigator.serial.requestPort(), false)
+		await attachSerialPort(await navigator.serial.requestPort())
 	} finally {
 		connectionInProgress = false
 		setConnectionLoading(false, 'serial')
 	}
 }
 
-async function attachSerialPort(port, automatic) {
+async function attachSerialPort(port, verifyDevice = false) {
 	serialPort = port
 	await serialPort.open({ baudRate: 115200 })
 	serialConnected = true
 	connectionMode = 'serial'
-	const info = serialPort.getInfo()
-	localStorage.setItem('bettafeeder.serialPort', JSON.stringify({
-		usbVendorId: info.usbVendorId || null,
-		usbProductId: info.usbProductId || null
-	}))
 	setConnected(true, 'BettaFeeder')
 	$('serialConnectButton').querySelector('.serial-button-label').textContent = 'Desconectar Serial'
-	log(automatic
-		? 'Serial reconectada automaticamente; Bluetooth será desativado pelo primeiro comando.'
-		: 'Serial conectada; Bluetooth será desativado pelo primeiro comando.', 'success')
+	log('Serial conectada; Bluetooth será desativado pelo primeiro comando.', 'success')
 	void readSerialLoop()
-	await sendCommand('STATUS')
+	if (verifyDevice) {
+		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
+	} else {
+		await sendCommand('STATUS')
+	}
 	void syncPushAuthorization()
 }
 
-async function reconnectSavedSerial() {
+async function reconnectAuthorizedSerial() {
 	if (connectionInProgress || isConnected() || !window.isSecureContext || !('serial' in navigator)) return
-	let savedInfo = null
-	try { savedInfo = JSON.parse(localStorage.getItem('bettafeeder.serialPort') || 'null') } catch (_) { }
-	if (!savedInfo) return
-	const ports = await navigator.serial.getPorts()
-	if (!ports.length) return
-	const matchingPort = ports.find(port => {
-		const info = port.getInfo()
-		return info.usbVendorId === savedInfo.usbVendorId && info.usbProductId === savedInfo.usbProductId
-	})
-	if (!matchingPort) return
+	let ports
+	try { ports = await navigator.serial.getPorts() } catch (_) { return }
+	if (!ports.length || connectionInProgress || isConnected()) return
+
 	connectionInProgress = true
+	setConnectionLoading(true, 'serial')
 	try {
-		await attachSerialPort(matchingPort, true)
-	} catch (error) {
-		serialConnected = false
-		serialPort = null
-		connectionMode = null
-		console.warn('Reconexão serial automática indisponível:', error)
+		for (const port of ports) {
+			try {
+				await attachSerialPort(port, true)
+				log('Porta USB Serial autorizada reconectada automaticamente.', 'success')
+				return
+			} catch (error) {
+				serialConnected = false
+				try { await serialReader?.cancel() } catch (_) { }
+				try { serialWriter?.releaseLock() } catch (_) { }
+				serialReader = null
+				serialWriter = null
+				try { await port.close() } catch (_) { }
+				serialPort = null
+				connectionMode = null
+				setConnected(false)
+				console.warn('Porta serial autorizada não respondeu como BettaFeeder:', error)
+			}
+		}
 	} finally {
 		connectionInProgress = false
+		setConnectionLoading(false, 'serial')
 	}
 }
 
@@ -373,40 +386,6 @@ async function readSerialLoop() {
 		}
 	}
 	if (serialConnected) onSerialDisconnected()
-}
-
-async function reconnectSavedDevice() {
-	return
-	const savedDevice = null
-	if (!savedDevice) return
-
-	if (connectionInProgress) return
-	connectionInProgress = true
-	setConnectionLoading(true)
-
-	try {
-		if (!('bluetooth' in navigator) || !window.isSecureContext) {
-			throw new Error('A reconexão Bluetooth exige um dispositivo compatível e HTTPS (ou localhost).')
-		}
-
-		if (typeof navigator.bluetooth.getDevices !== 'function') {
-			throw new Error('Este dispositivo não permite reconectar automaticamente. Toque em Conectar para selecionar o BettaFeeder.')
-		}
-
-		const permittedDevices = await navigator.bluetooth.getDevices()
-		const rememberedDevice = permittedDevices.find(item => item.id === savedDevice.id)
-		if (!rememberedDevice) {
-			throw new Error('O dispositivo salvo não está disponível para reconexão. Clique em Conectar para selecioná-lo novamente.')
-		}
-		await connect(rememberedDevice, true)
-	} catch (error) {
-		const message = errorMessage(error, 'Não foi possível reconectar ao dispositivo salvo.')
-		console.error(error)
-		log(`Falha na reconexão automática: ${message}`, 'error')
-	} finally {
-		connectionInProgress = false
-		setConnectionLoading(false)
-	}
 }
 
 function onDisconnected() {
@@ -445,7 +424,6 @@ async function disconnect() {
 		try { serialWriter?.releaseLock() } catch (_) { }
 		serialWriter = null
 		try { await serialPort?.close() } catch (_) { }
-		localStorage.removeItem('bettafeeder.serialPort')
 		onSerialDisconnected()
 		return
 	}
@@ -462,7 +440,7 @@ async function sendCommand(command, quiet = false) {
 	} else {
 		throw new Error('Conecte ao BettaFeeder primeiro.')
 	}
-	if (!quiet && !command.startsWith('FCM_ADD=')) log(`Enviado: ${command}`)
+	if (!quiet && !command.startsWith('FCM_ADD=') && !command.startsWith('PK_ADD=')) log(`Enviado: ${command}`)
 }
 
 async function guarded(action) {
@@ -495,7 +473,6 @@ $('saveTimesButton').addEventListener('click', () => guarded(async () => {
 		`TIMES=${first},${second}`,
 		message => message.startsWith('OK: horarios salvos=') || message.startsWith('ERRO:')
 	)
-	saveFeedTimes(first, second)
 	toast('Horários enviados ao ESP32')
 }))
 
@@ -509,9 +486,69 @@ $('wifiForm').addEventListener('submit', event => guarded(async () => {
 	await sendCommand(`SSID=${ssid}`)
 	await new Promise(resolve => setTimeout(resolve, 250))
 	await sendCommand(`PASS=${password}`)
-	try { localStorage.setItem('bettafeeder.ssid', ssid) } catch (_) { }
 	$('password').value = ''
 	toast('Dados do Wi-Fi enviados')
+}))
+
+$('firebaseConfigForm').addEventListener('submit', event => guarded(async () => {
+	event.preventDefault()
+	const projectId = $('firebaseProjectId').value.trim()
+	const clientEmail = $('firebaseClientEmail').value.trim()
+	const privateKeyInput = $('firebasePrivateKey').value.trim()
+	if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(projectId)) {
+		throw new Error('Informe um ID de projeto Firebase válido.')
+	}
+	if (!clientEmail.endsWith('.iam.gserviceaccount.com')) {
+		throw new Error('Informe o e-mail de uma conta de serviço Firebase.')
+	}
+	let privateKey = ''
+	if (privateKeyInput) {
+		privateKey = privateKeyInput
+			.replace(/^['"]|['"]$/g, '')
+			.replace(/\r\n?/g, '\n')
+			.replace(/\\n/g, '\n')
+			.trim()
+			.replace(/\n/g, '\\n')
+		if (!privateKey.includes('-----BEGIN PRIVATE KEY-----') || !privateKey.includes('-----END PRIVATE KEY-----')) {
+			throw new Error('A chave deve estar no formato PEM da conta de serviço.')
+		}
+		if (privateKey.length < 300 || privateKey.length > 1900) {
+			throw new Error('O tamanho da chave privada PEM é inválido.')
+		}
+	}
+	const button = $('saveFirebaseConfigButton')
+	button.disabled = true
+	button.textContent = 'Enviando credenciais...'
+	$('firebaseConfigState').textContent = 'Enviando credenciais ao ESP32...'
+	try {
+		await sendCommandAndWait('FB_BEGIN', message => message === 'OK: FB_BEGIN' || message.startsWith('ERRO:'))
+		const sendFragmentedField = async (begin, add, save, value) => {
+			await sendCommandAndWait(`${begin}=${value.length}`, message => message === `OK: ${begin}` || message.startsWith('ERRO:'))
+			for (let i = 0; i < value.length; i += 12) {
+				await sendCommand(`${add}=${value.slice(i, i + 12)}`, true)
+				await new Promise(resolve => setTimeout(resolve, 100))
+			}
+			await sendCommandAndWait(save, message => message === `OK: ${save}` || message.startsWith('ERRO:'))
+		}
+		await sendFragmentedField('PRJ_BEGIN', 'PRJ_ADD', 'PRJ_SAVE', projectId)
+		await sendFragmentedField('EML_BEGIN', 'EML_ADD', 'EML_SAVE', clientEmail)
+		if (privateKey) {
+			await sendCommandAndWait(`PK_BEGIN=${privateKey.length}`, message => message === 'OK: PK_BEGIN' || message.startsWith('ERRO:'))
+			for (let i = 0; i < privateKey.length; i += 12) {
+				await sendCommand(`PK_ADD=${privateKey.slice(i, i + 12)}`, true)
+				await new Promise(resolve => setTimeout(resolve, 100))
+			}
+			await sendCommandAndWait('PK_SAVE', message => message === 'OK: PK_SAVE' || message.startsWith('ERRO:'))
+		}
+		await sendCommandAndWait('FB_SAVE', message => message === 'OK: credenciais Firebase salvas.' || message.startsWith('ERRO:'))
+		$('firebasePrivateKey').value = ''
+		await sendCommand('STATUS', true)
+		$('firebaseConfigState').textContent = 'Credenciais FCM salvas no ESP32.'
+		toast('Credenciais Firebase enviadas')
+	} finally {
+		button.textContent = 'Salvar credenciais no ESP32'
+		button.disabled = !isConnected()
+	}
 }))
 
 $('togglePassword').addEventListener('click', () => {
@@ -565,12 +602,10 @@ if ('serviceWorker' in navigator && window.isSecureContext) {
 	})
 }
 
-// Web Serial só permite reconectar automaticamente portas que o usuário já
-// autorizou. Não abre seletor e não tenta reconectar Bluetooth.
 window.addEventListener('load', () => {
-	void reconnectSavedSerial()
 	if ('serial' in navigator) {
-		navigator.serial.addEventListener('connect', () => { void reconnectSavedSerial() })
+		void reconnectAuthorizedSerial()
+		navigator.serial.addEventListener('connect', () => { void reconnectAuthorizedSerial() })
 		navigator.serial.addEventListener('disconnect', event => {
 			if (event.target === serialPort) onSerialDisconnected()
 		})
@@ -581,12 +616,8 @@ window.addEventListener('load', () => {
 let currentFcmToken = ''
 let fbMessaging = null
 let messageListenerRegistered = false
-const pushDisabledStorageKey = 'bettafeeder.pushDisabled'
-let pushActive = false
-try {
-	pushActive = 'Notification' in window && Notification.permission === 'granted' &&
-		localStorage.getItem(pushDisabledStorageKey) !== 'true'
-} catch (_) { }
+let pushActive = 'Notification' in window && Notification.permission === 'granted'
+let pushTransitioning = false
 
 function firebaseWebConfigured() {
 	const config = window.BETTA_FIREBASE_CONFIG
@@ -621,7 +652,6 @@ async function enablePushNotifications() {
 	if (!token) throw new Error('Firebase não forneceu token de registro.')
 	currentFcmToken = token
 	pushActive = true
-	try { localStorage.removeItem(pushDisabledStorageKey) } catch (_) { }
 	$('pushState').textContent = 'Push ativo neste dispositivo. O registro no ESP32 ocorre automaticamente quando conectado.'
 	$('pushTest').disabled = !isConnected()
 	if (!messageListenerRegistered) {
@@ -635,6 +665,7 @@ async function enablePushNotifications() {
 		})
 	}
 	if (isConnected()) await pairFcmToken()
+	updatePushControl()
 }
 
 async function showNativeNotification(title, body) {
@@ -654,18 +685,17 @@ async function showNativeNotification(title, body) {
 }
 
 function updatePushControl() {
-	const enableButton = $('pushEnable')
-	const loading = enableButton.classList.contains('is-loading')
-	enableButton.querySelector('.push-button-label').textContent = loading
-		? 'Aguarde...'
-		: (pushActive ? 'Desativar notificações' : 'Ativar notificações')
-	enableButton.classList.toggle('button-danger', pushActive)
-	enableButton.disabled = loading || !isConnected()
+	const toggle = $('pushToggle')
+	const enabled = pushTransitioning ? toggle.checked : pushActive
+	if (!pushTransitioning) toggle.checked = pushActive
+	toggle.disabled = pushTransitioning || !isConnected()
+	$('pushToggleLabel').textContent = enabled ? 'Ativas neste dispositivo' : 'Desativadas neste dispositivo'
+	$('notificationDetails').hidden = enabled
+	$('pushTest').disabled = !isConnected() || enabled
 }
 
 async function disablePushNotifications() {
 	pushActive = false
-	try { localStorage.setItem(pushDisabledStorageKey, 'true') } catch (_) { }
 	updatePushControl()
 	if (fbMessaging && currentFcmToken) await fbMessaging.deleteToken()
 	currentFcmToken = ''
@@ -675,21 +705,21 @@ async function disablePushNotifications() {
 	updatePushControl()
 }
 
-$('pushEnable').addEventListener('click', async () => {
-	const enableButton = $('pushEnable')
-	const disabling = pushActive
-	if (disabling && !await confirmAction('Desativar notificações', 'Deseja desativar as notificações push neste dispositivo? A permissão do navegador continuará concedida.')) return
-	enableButton.classList.add('is-loading')
-	enableButton.setAttribute('aria-busy', 'true')
+$('pushToggle').addEventListener('change', async event => {
+	const requestedEnabled = event.currentTarget.checked
+	if (!requestedEnabled && pushActive && !await confirmAction('Desativar notificações', 'Deseja desativar as notificações push neste dispositivo? A permissão do navegador continuará concedida.')) {
+		updatePushControl()
+		return
+	}
+	pushTransitioning = true
 	updatePushControl()
 	try {
 		await guarded(async () => {
-			if (disabling) await disablePushNotifications()
+			if (!requestedEnabled) await disablePushNotifications()
 			else await enablePushNotifications()
 		})
 	} finally {
-		enableButton.classList.remove('is-loading')
-		enableButton.removeAttribute('aria-busy')
+		pushTransitioning = false
 		updatePushControl()
 	}
 })
