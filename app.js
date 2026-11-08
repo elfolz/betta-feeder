@@ -34,6 +34,7 @@ let toastTimer = null
 let connectionInProgress = false
 let rxFragments = ''
 let statusRefreshTimer = null
+let feedReferenceReady = false
 const bleResponseWaiters = []
 
 function isConnected() {
@@ -42,6 +43,12 @@ function isConnected() {
 
 function hasCommandTransport() {
 	return Boolean(rxCharacteristic || serialWriter)
+}
+
+function updateFeedButtonAvailability() {
+	const button = $('testFeedButton')
+	const remaining = Number($('portionsStatus').textContent)
+	button.disabled = !isConnected() || !feedReferenceReady || remaining <= 0 || button.classList.contains('is-loading')
 }
 
 function log(message, kind = 'info') {
@@ -71,6 +78,16 @@ function toast(message) {
 	toastTimer = setTimeout(() => el.classList.remove('show'), 2600)
 }
 
+function confirmAction(title, message) {
+	const dialog = $('confirmDialog')
+	$('confirmTitle').textContent = title
+	$('confirmMessage').textContent = message
+	dialog.showModal()
+	return new Promise(resolve => {
+		dialog.addEventListener('close', () => resolve(dialog.returnValue === 'confirm'), { once: true })
+	})
+}
+
 function waitForBleResponse(predicate, timeoutMs = 3000) {
 	return new Promise((resolve, reject) => {
 		const waiter = { predicate, resolve, reject, timer: null }
@@ -94,8 +111,8 @@ function resolveBleResponse(message) {
 	}
 }
 
-async function sendCommandAndWait(command, predicate) {
-	const responsePromise = waitForBleResponse(predicate)
+async function sendCommandAndWait(command, predicate, timeoutMs = 3000) {
+	const responsePromise = waitForBleResponse(predicate, timeoutMs)
 	await sendCommand(command)
 	const response = await responsePromise
 	if (response.startsWith('ERRO:')) throw new Error(`ESP32: ${response}`)
@@ -120,7 +137,7 @@ function setConnected(connected, name = 'BettaFeeder') {
 	$('saveTimesButton').disabled = !connected
 	$('saveWifiButton').disabled = !connected
 	$('statusButton').disabled = !connected
-	$('testFeedButton').disabled = !connected
+	updateFeedButtonAvailability()
 	$('homeButton').disabled = !connected
 	$('reloadButton').disabled = true // enabled only after STATUS reports aguardando_recarga
 	$('feed1').disabled = !connected
@@ -169,12 +186,22 @@ function setConnectionLoading(loading, mode = 'bluetooth') {
 function parseDeviceMessage(message) {
 	log(`ESP32: ${message}`, 'success')
 	resolveBleResponse(message)
+	if (message.startsWith('ALIMENTACAO:')) {
+		const batchMatch = message.match(/porcoes_no_lote=(\d+)\/14/)
+		if (batchMatch) {
+			const dispensed = Number(batchMatch[1])
+			$('portionsStatus').textContent = String(Math.max(0, 14 - dispensed))
+			updateFeedButtonAvailability()
+		}
+		return
+	}
 	if (!message.startsWith('STATUS;')) return
 	const fields = Object.fromEntries(message.split(';').slice(1).map(part => {
 		const i = part.indexOf('=')
 		return i < 0 ? [part, ''] : [part.slice(0, i), part.slice(i + 1)]
 	}))
-	$('wifiStatus').textContent = fields.wifi || '—'
+	const wifiLabels = { conectado: 'Conectado', desconectado: 'Desconectado' }
+	$('wifiStatus').textContent = wifiLabels[fields.wifi] || '—'
 	const dateMatch = fields.data?.match(/^(\d{4})-(\d{2})-(\d{2})$/)
 	const arduinoDate = dateMatch
 		? `${dateMatch[3]}/${dateMatch[2]}/${dateMatch[1].slice(-2)}`
@@ -182,7 +209,7 @@ function parseDeviceMessage(message) {
 	const timeMatch = fields.hora?.match(/^(\d{2}:\d{2})(?::(\d{1,2}))?$/)
 	const arduinoTime = timeMatch
 		? `${timeMatch[1]}:${(timeMatch[2] || '00').padStart(2, '0')}`
-		: fields.hora
+		: (fields.hora === 'nao_sincronizada' ? 'Não sincronizado' : fields.hora)
 	$('clockStatus').textContent = arduinoTime && arduinoDate
 		? `${arduinoTime} ${arduinoDate}`
 		: (arduinoTime || '—')
@@ -196,10 +223,16 @@ function parseDeviceMessage(message) {
 		? `${temperature.replace('.', ',')} °C`
 		: 'Indisponível'
 	$('temperatureStatus').classList.toggle('temperature-low', temperature !== undefined && temperature !== 'indisponivel' && Number(temperature) < 22)
-	$('batchStatus').textContent = `Referência: ${fields.referencia || '—'} · Lote: ${fields.lote || '—'}`
-	if (fields.push) $('pushState').textContent = 'Destino no ESP32: ' + fields.push
+	const referenceLabels = { confirmada: 'Confirmada', verificar: 'Precisa ser definida' }
+	const batchLabels = { pronto: 'Pronto', aguardando_recarga: 'Aguardando recarga' }
+	$('batchStatus').textContent = `Referência: ${referenceLabels[fields.referencia] || '—'} · Lote: ${batchLabels[fields.lote] || '—'}`
+	if (fields.push) {
+		const pushLabels = { configurado: 'Configurado', sem_destino: 'Sem destino configurado' }
+		$('pushState').textContent = 'Destino no ESP32: ' + (pushLabels[fields.push] || 'Estado desconhecido')
+	}
 	const ready = fields.referencia === 'confirmada'
-	$('testFeedButton').disabled = !(isConnected() && ready)
+	feedReferenceReady = ready
+	updateFeedButtonAvailability()
 	$('reloadButton').disabled = !(isConnected() && ready && waitingForReload)
 	if (fields.feed1) $('feed1').value = fields.feed1
 	if (fields.feed2) $('feed2').value = fields.feed2
@@ -488,15 +521,33 @@ $('togglePassword').addEventListener('click', () => {
 
 $('statusButton').addEventListener('click', () => guarded(() => sendCommand('STATUS')))
 $('testFeedButton').addEventListener('click', () => guarded(async () => {
-	if (!confirm('Alimentar agora? O motor vai liberar uma porção imediatamente.')) return
-	await sendCommand('FEED')
+	if (!await confirmAction('Confirmar alimentação', 'Alimentar agora? O motor vai liberar uma porção imediatamente.')) return
+	const button = $('testFeedButton')
+	button.classList.add('is-loading')
+	button.disabled = true
+	button.setAttribute('aria-busy', 'true')
+	button.querySelector('.feed-button-label').textContent = 'Alimentando...'
+	try {
+		const response = await sendCommandAndWait(
+			'FEED',
+			message => message.startsWith('ALIMENTACAO:') || message.startsWith('BLOQUEADO:') ||
+				message.startsWith('FALHA:') || message.startsWith('LOTE_VAZIO:'),
+			60000
+		)
+		if (!response.startsWith('ALIMENTACAO:')) throw new Error(`ESP32: ${response}`)
+	} finally {
+		button.classList.remove('is-loading')
+		button.removeAttribute('aria-busy')
+		button.querySelector('.feed-button-label').textContent = 'Alimentar agora'
+		updateFeedButtonAvailability()
+	}
 }))
 $('homeButton').addEventListener('click', () => guarded(async () => {
-	if (!confirm('Confirma que a cavidade vazia está fisicamente alinhada com a saída?')) return
+	if (!await confirmAction('Definir posição inicial', 'Confirma que a cavidade vazia está fisicamente alinhada com a saída?')) return
 	await sendCommand('SET_HOME')
 }))
 $('reloadButton').addEventListener('click', () => guarded(async () => {
-	if (!confirm('Confirma que a recarga foi concluída? O ESP32 vai estacionar o rotor e liberar as próximas alimentações.')) return
+	if (!await confirmAction('Confirmar recarga', 'Confirma que a recarga foi concluída? O ESP32 vai estacionar o rotor e liberar as próximas alimentações.')) return
 	await sendCommand('RELOAD')
 	await sendCommand('STATUS', true)
 }))
@@ -528,6 +579,12 @@ window.addEventListener('load', () => {
 let currentFcmToken = ''
 let fbMessaging = null
 let messageListenerRegistered = false
+const pushDisabledStorageKey = 'bettafeeder.pushDisabled'
+let pushActive = false
+try {
+	pushActive = 'Notification' in window && Notification.permission === 'granted' &&
+		localStorage.getItem(pushDisabledStorageKey) !== 'true'
+} catch (_) { }
 
 function firebaseWebConfigured() {
 	const config = window.BETTA_FIREBASE_CONFIG
@@ -561,6 +618,8 @@ async function enablePushNotifications() {
 	})
 	if (!token) throw new Error('Firebase não forneceu token de registro.')
 	currentFcmToken = token
+	pushActive = true
+	try { localStorage.removeItem(pushDisabledStorageKey) } catch (_) { }
 	$('pushState').textContent = 'Push ativo neste dispositivo. O registro no ESP32 ocorre automaticamente quando conectado.'
 	$('pushTest').disabled = !isConnected()
 	if (!messageListenerRegistered) {
@@ -593,17 +652,19 @@ async function showNativeNotification(title, body) {
 }
 
 function updatePushControl() {
-	const permissionGranted = 'Notification' in window && Notification.permission === 'granted'
 	const enableButton = $('pushEnable')
 	const loading = enableButton.classList.contains('is-loading')
 	enableButton.querySelector('.push-button-label').textContent = loading
-		? 'Aguardando permissão...'
-		: (permissionGranted ? 'Desativar notificações e remover a permissão' : 'Ativar notificações')
-	enableButton.classList.toggle('button-danger', permissionGranted)
+		? 'Aguarde...'
+		: (pushActive ? 'Desativar notificações' : 'Ativar notificações')
+	enableButton.classList.toggle('button-danger', pushActive)
 	enableButton.disabled = loading || !isConnected()
 }
 
 async function disablePushNotifications() {
+	pushActive = false
+	try { localStorage.setItem(pushDisabledStorageKey, 'true') } catch (_) { }
+	updatePushControl()
 	if (fbMessaging && currentFcmToken) await fbMessaging.deleteToken()
 	currentFcmToken = ''
 	await clearPairedFcmToken()
@@ -614,15 +675,14 @@ async function disablePushNotifications() {
 
 $('pushEnable').addEventListener('click', async () => {
 	const enableButton = $('pushEnable')
-	const requestingPermission = !('Notification' in window) || Notification.permission !== 'granted'
-	if (requestingPermission) {
-		enableButton.classList.add('is-loading')
-		enableButton.setAttribute('aria-busy', 'true')
-		updatePushControl()
-	}
+	const disabling = pushActive
+	if (disabling && !await confirmAction('Desativar notificações', 'Deseja desativar as notificações push neste dispositivo? A permissão do navegador continuará concedida.')) return
+	enableButton.classList.add('is-loading')
+	enableButton.setAttribute('aria-busy', 'true')
+	updatePushControl()
 	try {
 		await guarded(async () => {
-			if ('Notification' in window && Notification.permission === 'granted') await disablePushNotifications()
+			if (disabling) await disablePushNotifications()
 			else await enablePushNotifications()
 		})
 	} finally {
@@ -685,7 +745,13 @@ async function clearPairedFcmToken() {
 async function syncPushAuthorization() {
 	if (!isConnected()) return
 	if (!('Notification' in window) || Notification.permission !== 'granted') {
+		pushActive = false
 		updatePushControl()
+		try { await clearPairedFcmToken() }
+		catch (error) { log(`Falha ao remover o destino FCM: ${error?.message || error}`, 'error') }
+		return
+	}
+	if (!pushActive) {
 		try { await clearPairedFcmToken() }
 		catch (error) { log(`Falha ao remover o destino FCM: ${error?.message || error}`, 'error') }
 		return

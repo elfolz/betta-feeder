@@ -651,14 +651,14 @@ void feedOnePortion(const char* source) {
   portionsDispensed++;
   saveSettings();
   notifyBLE(String("ALIMENTACAO: ") + source + "; porcoes_no_lote=" + String(portionsDispensed) + "/14");
-  queuePush("FEED_COMMANDED", "Motor acionado; dose " + String(portionsDispensed) +
-            "/14. Queda da racao nao confirmada por sensor.");
+  queuePush("FEED_COMMANDED", "Ração fornecida, porção " + String(portionsDispensed) +
+            "/14.");
   if (portionsDispensed == PORTIONS_PER_LOAD) {
     // Stop at pocket 14 until the owner refills and confirms through the PWA.
     awaitingReload = true;
     saveSettings();
-    notifyBLE("LOTE_FINALIZADO: rotor parado apos 14 doses. Reabasteca e confirme a recarga no PWA.");
-    queuePush("EMPTY", "14 doses acionadas. O alimentador esta parado; reabasteca e confirme a recarga no PWA para retomar.");
+    notifyBLE("LOTE_FINALIZADO: A última porção foi aplicada. Reabasteça o alimentador!");
+    queuePush("EMPTY", "A última porção foi aplicada. Reabasteça o alimentador!");
   }
   feedInProgress = false;
 }

@@ -71,12 +71,12 @@
 				<div class="status-item"><small>Wi-Fi</small><strong id="wifiStatus">—</strong></div>
 			</div>
 			<div class="status-actions">
-				<button id="testFeedButton" class="button button-primary" disabled>Alimentar agora</button>
+				<button id="testFeedButton" class="button button-primary" type="button" aria-busy="false" disabled><span class="connect-spinner" aria-hidden="true"></span><span class="feed-button-label">Alimentar agora</span></button>
 				<button id="homeButton" class="button button-ghost" disabled>Definir posição inicial</button>
 				<button id="reloadButton" class="button button-secondary" disabled>Confirmar recarga</button>
 			</div>
 			<p class="helper small" id="batchStatus">Referência ainda não verificada.</p>
-			<p class="helper small">A posição do rotor é salva a cada rotação e restaurada sem movimento após reinício. Se faltar energia durante uma rotação, alinhe manualmente a cavidade vazia e defina a posição inicial. Após 14 doses, o alimentador envia uma notificação e para; reabasteça e confirme aqui. O motor só gira ao alimentar agora ou nos horários programados.</p>
+			<p class="helper small">A posição do rotor é salva a cada rotação e restaurada sem movimento após reinício. Se faltar energia durante uma rotação, alinhe manualmente a cavidade vazia e defina a posição inicial. Após 14 porções, o alimentador envia uma notificação e para; reabasteça e confirme aqui. O motor só gira ao alimentar agora ou nos horários programados.</p>
 		</section>
 
 		<section class="panel">
@@ -127,8 +127,7 @@
 						</div>
 					</label>
 				</div>
-				<button id="saveWifiButton" class="button button-secondary full" type="submit" disabled>Enviar dados do
-					Wi-Fi</button>
+				<button id="saveWifiButton" class="button button-secondary full" type="submit" disabled>Enviar dados do Wi-Fi ao ESP32</button>
 			</form>
 			<p class="privacy-note"><svg viewBox="0 0 24 24" aria-hidden="true">
 					<rect x="5" y="10" width="14" height="11" rx="2" />
@@ -152,7 +151,7 @@
 			<h3 class="notification-heading">Notificações push automáticas</h3>
 			<ul class="notification-list">
 				<li><strong>Alimentação acionada</strong><span>Enviada após cada acionamento programado ou manual, exceto na 14ª porção do ciclo, quando é substituída pelo aviso de fim de ciclo. Confirma o comando do motor, não a queda da ração.</span></li>
-				<li><strong>Recarga necessária</strong><span>Enviada após a 14ª dose. O ESP32 para e só retoma quando a recarga for confirmada pelo botão no PWA.</span></li>
+				<li><strong>Recarga necessária</strong><span>Enviada após a 14ª porção. O ESP32 para e só retoma quando a recarga for confirmada pelo botão no PWA.</span></li>
 				<li><strong>Temperatura da água abaixo de 22 °C</strong><span>O ESP32 envia um alerta quando a leitura do DS18B20 cai abaixo de 22 °C. Um novo alerta só é enviado depois que a água voltar a 22 °C ou mais e cair novamente.</span></li>
 				<li><strong>Movimento interrompido</strong><span>Enviada ao iniciar se o ESP32 detectar que a energia foi interrompida durante o movimento. Confira o rotor e defina novamente a posição inicial.</span></li>
 				<li><strong>Horário perdido</strong><span>Enviada quando o ESP32 verifica o horário programado com mais de 30 minutos de atraso e ignora aquela alimentação.</span></li>
@@ -173,11 +172,22 @@
 			<span>Feito para cuidar no tempo certo.</span>
 		</footer>
 	</main>
+	<dialog id="confirmDialog" class="confirm-dialog" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
+		<form method="dialog" class="confirm-card">
+			<div class="section-kicker">CONFIRMAÇÃO</div>
+			<h2 id="confirmTitle">Confirmar alimentação</h2>
+			<p id="confirmMessage"></p>
+			<div class="confirm-actions">
+				<button class="button button-ghost" type="submit" value="cancel">Cancelar</button>
+				<button class="button button-primary" type="submit" value="confirm">Confirmar</button>
+			</div>
+		</form>
+	</dialog>
 	<div id="toast" class="toast" role="status" aria-live="polite"></div>
 	<script src="./firebase-config.js" defer></script>
 	<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js" defer></script>
 	<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-compat.js" defer></script>
-	<script src="./app.js?v=21" defer></script>
+	<script src="./app.js?v=22" defer></script>
 </body>
 
 </html>

@@ -35,6 +35,45 @@ button {
 	cursor: pointer
 }
 
+.confirm-dialog {
+	width: min(100% - 32px, 430px);
+	padding: 0;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: transparent;
+	color: var(--text);
+	box-shadow: 0 24px 80px rgba(0, 0, 0, .55)
+}
+
+.confirm-dialog::backdrop {
+	background: rgba(8, 11, 16, .48);
+	backdrop-filter: blur(10px);
+	-webkit-backdrop-filter: blur(10px)
+}
+
+.confirm-card {
+	padding: 24px;
+	background: linear-gradient(145deg, #22272d, #191c20)
+}
+
+.confirm-card h2 {
+	margin: 10px 0 8px;
+	font-size: 21px
+}
+
+.confirm-card p {
+	margin: 0;
+	color: var(--muted);
+	line-height: 1.6
+}
+
+.confirm-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 10px;
+	margin-top: 24px
+}
+
 .app-shell {
 	width: min(100% - 32px, 760px);
 	margin: 0 auto;
@@ -293,6 +332,11 @@ button:disabled {
 .button-secondary.is-loading .connect-spinner {
 	border-color: rgba(255, 255, 255, .35);
 	border-top-color: #fff
+}
+
+button.button-primary:disabled.is-loading .connect-spinner {
+	border-color: rgba(133, 141, 151, .35);
+	border-top-color: #858d97
 }
 
 @keyframes connect-spin {
