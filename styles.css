@@ -417,7 +417,8 @@ textarea {
 	resize: vertical;
 	font: 12px 'DM Mono', monospace;
 	line-height: 1.5;
-	overflow-wrap: anywhere
+	overflow-wrap: anywhere;
+	resize: none;
 }
 
 input:disabled,
@@ -428,6 +429,35 @@ select:disabled {
 	border-color: #41464e;
 	opacity: 1;
 	cursor: not-allowed
+}
+
+input.firmware-loading,
+textarea.firmware-loading,
+.status-item strong.firmware-loading,
+.helper.firmware-loading {
+	color: transparent;
+	background: linear-gradient(100deg, #34383e 20%, #505761 45%, #34383e 70%);
+	background-size: 220% 100%;
+	animation: firmware-shimmer 1.25s ease-in-out infinite
+}
+
+.status-item strong.firmware-loading,
+.helper.firmware-loading {
+	display: inline-block;
+	min-width: 55%;
+	min-height: 1em;
+	border-radius: 4px
+}
+
+input.firmware-loading::placeholder,
+textarea.firmware-loading::placeholder {
+	color: transparent
+}
+
+@keyframes firmware-shimmer {
+	to {
+		background-position: -220% 0
+	}
 }
 
 input:focus,

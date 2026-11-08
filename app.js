@@ -10,6 +10,15 @@ const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 try { localStorage.clear() } catch (_) { }
 
+const firmwareFieldIds = [
+	'ssid', 'feed1', 'feed2', 'firebaseProjectId', 'firebaseClientEmail',
+	'wifiStatus', 'clockStatus', 'portionsStatus', 'temperatureStatus',
+	'batchStatus', 'pushState', 'firebaseConfigState'
+]
+function setFirmwareFieldsLoading(loading) {
+	firmwareFieldIds.forEach(id => $(id).classList.toggle('firmware-loading', loading))
+}
+
 let device = null
 let server = null
 let rxCharacteristic = null
@@ -26,6 +35,7 @@ let rxFragments = ''
 let statusRefreshTimer = null
 let feedReferenceReady = false
 let feedTimesReceived = false
+let firebaseSetupAlertShown = false
 const bleResponseWaiters = []
 
 function isConnected() {
@@ -79,6 +89,22 @@ function confirmAction(title, message) {
 	})
 }
 
+function alertIfFirebaseSetupIncomplete(deviceFirebaseState) {
+	if (!pushActive || firebaseSetupAlertShown) return
+	const missing = []
+	if (!firebaseWebConfigured()) missing.push('Firebase Web do PWA')
+	if (deviceFirebaseState !== 'configurado') missing.push('credenciais FCM do ESP32')
+	if (missing.length === 0) return
+
+	firebaseSetupAlertShown = true
+	$('firebaseSetupMessage').textContent =
+		'As notificações estão ativadas neste dispositivo, mas falta configurar: ' +
+		missing.join(' e ') + '. Revise a seção de notificações e salve as credenciais necessárias.'
+	$('firebaseSetupDialog').showModal()
+}
+
+$('firebaseSetupDismiss').addEventListener('click', () => $('firebaseSetupDialog').close())
+
 function waitForBleResponse(predicate, timeoutMs = 3000) {
 	return new Promise((resolve, reject) => {
 		const waiter = { predicate, resolve, reject, timer: null }
@@ -118,6 +144,7 @@ function errorMessage(error, fallback = 'Ocorreu um erro ao conectar ao Bluetoot
 
 function setConnected(connected, name = 'BettaFeeder') {
 	if (!connected) feedTimesReceived = false
+	setFirmwareFieldsLoading(connected)
 	const badge = $('connectionBadge')
 	badge.classList.toggle('online', connected)
 	badge.classList.toggle('offline', !connected)
@@ -141,7 +168,7 @@ function setConnected(connected, name = 'BettaFeeder') {
 	$('firebaseProjectId').disabled = !connected
 	$('firebaseClientEmail').disabled = !connected
 	$('firebasePrivateKey').disabled = !connected
-	$('saveFirebaseConfigButton').disabled = !connected
+	$('saveFirebaseConfigButton').disabled = !connected || $('saveFirebaseConfigButton').classList.contains('is-loading')
 	const bluetoothButton = $('connectButton')
 	const serialButton = $('serialConnectButton')
 	const serialActive = connected && connectionMode === 'serial'
@@ -150,7 +177,7 @@ function setConnected(connected, name = 'BettaFeeder') {
 	serialButton.disabled = (connected && Boolean(device?.gatt?.connected)) || serialButton.classList.contains('is-loading')
 	if (!serialButton.classList.contains('is-loading')) {
 		serialButton.querySelector('.serial-button-label').textContent = connectionMode === 'serial' && connected
-			? 'Desconectar Serial'
+			? 'Desconectar USB Serial'
 			: 'Conectar via USB Serial'
 	}
 	bluetoothButton.classList.toggle('button-danger', connected && connectionMode !== 'serial')
@@ -173,7 +200,7 @@ function setConnectionLoading(loading, mode = 'bluetooth') {
 	button.querySelector(serial ? '.serial-button-label' : '.connect-button-label').textContent = loading
 		? 'Conectando...'
 		: (serial
-			? (serialConnected ? 'Desconectar Serial' : 'Conectar via USB Serial')
+			? (serialConnected ? 'Desconectar USB Serial' : 'Conectar via USB Serial')
 			: (device?.gatt?.connected ? 'Desconectar' : 'Conectar via Bluetooth'))
 	button.classList.toggle('button-danger', !loading && (serial ? serialConnected : Boolean(device?.gatt?.connected)))
 }
@@ -249,6 +276,8 @@ function parseDeviceMessage(message) {
 	$('feed1').disabled = !isConnected() || !feedTimesReceived
 	$('feed2').disabled = !isConnected() || !feedTimesReceived
 	$('saveTimesButton').disabled = !isConnected() || !feedTimesReceived
+	setFirmwareFieldsLoading(false)
+	alertIfFirebaseSetupIncomplete(fields.firebase)
 }
 
 function onNotification(event) {
@@ -320,7 +349,7 @@ async function attachSerialPort(port, verifyDevice = false) {
 	serialConnected = true
 	connectionMode = 'serial'
 	setConnected(true, 'BettaFeeder')
-	$('serialConnectButton').querySelector('.serial-button-label').textContent = 'Desconectar Serial'
+	$('serialConnectButton').querySelector('.serial-button-label').textContent = 'Desconectar USB Serial'
 	log('Serial conectada; Bluetooth será desativado pelo primeiro comando.', 'success')
 	void readSerialLoop()
 	if (verifyDevice) {
@@ -411,6 +440,7 @@ function onSerialDisconnected() {
 async function disconnect() {
 	if (device?.gatt?.connected) return device.gatt.disconnect()
 	if (serialConnected) {
+		const portToForget = serialPort
 		// BLE_ON clears the firmware's persistent serial mode and restarts BLE.
 		try {
 			log('Solicitando reativação do Bluetooth no ESP32...')
@@ -423,6 +453,11 @@ async function disconnect() {
 		try { await serialReader?.cancel() } catch (_) { }
 		try { serialWriter?.releaseLock() } catch (_) { }
 		serialWriter = null
+		try {
+			if (typeof portToForget?.forget === 'function') await portToForget.forget()
+		} catch (error) {
+			console.warn('Não foi possível revogar a autorização da porta serial:', error)
+		}
 		try { await serialPort?.close() } catch (_) { }
 		onSerialDisconnected()
 		return
@@ -490,6 +525,19 @@ $('wifiForm').addEventListener('submit', event => guarded(async () => {
 	toast('Dados do Wi-Fi enviados')
 }))
 
+$('firebasePrivateKey').addEventListener('paste', event => {
+	const pastedText = event.clipboardData?.getData('text')
+	if (!pastedText?.includes('\\n')) return
+	event.preventDefault()
+	const textarea = event.currentTarget
+	textarea.setRangeText(
+		pastedText.replace(/\\n/g, '\n'),
+		textarea.selectionStart,
+		textarea.selectionEnd,
+		'end'
+	)
+})
+
 $('firebaseConfigForm').addEventListener('submit', event => guarded(async () => {
 	event.preventDefault()
 	const projectId = $('firebaseProjectId').value.trim()
@@ -517,8 +565,11 @@ $('firebaseConfigForm').addEventListener('submit', event => guarded(async () => 
 		}
 	}
 	const button = $('saveFirebaseConfigButton')
+	const buttonLabel = $('saveFirebaseConfigButtonLabel')
 	button.disabled = true
-	button.textContent = 'Enviando credenciais...'
+	button.classList.add('is-loading')
+	button.setAttribute('aria-busy', 'true')
+	buttonLabel.textContent = 'Enviando credenciais...'
 	$('firebaseConfigState').textContent = 'Enviando credenciais ao ESP32...'
 	try {
 		await sendCommandAndWait('FB_BEGIN', message => message === 'OK: FB_BEGIN' || message.startsWith('ERRO:'))
@@ -546,7 +597,9 @@ $('firebaseConfigForm').addEventListener('submit', event => guarded(async () => 
 		$('firebaseConfigState').textContent = 'Credenciais FCM salvas no ESP32.'
 		toast('Credenciais Firebase enviadas')
 	} finally {
-		button.textContent = 'Salvar credenciais no ESP32'
+		button.classList.remove('is-loading')
+		button.setAttribute('aria-busy', 'false')
+		buttonLabel.textContent = 'Salvar credenciais no ESP32'
 		button.disabled = !isConnected()
 	}
 }))
@@ -690,8 +743,8 @@ function updatePushControl() {
 	if (!pushTransitioning) toggle.checked = pushActive
 	toggle.disabled = pushTransitioning || !isConnected()
 	$('pushToggleLabel').textContent = enabled ? 'Ativas neste dispositivo' : 'Desativadas neste dispositivo'
-	$('notificationDetails').hidden = enabled
-	$('pushTest').disabled = !isConnected() || enabled
+	$('notificationDetails').hidden = !enabled
+	$('pushTest').disabled = !isConnected() || !enabled
 }
 
 async function disablePushNotifications() {
@@ -770,7 +823,7 @@ async function clearPairedFcmToken() {
 		message => message === 'OK: destino FCM removido' || message.startsWith('ERRO:')
 	)
 	currentFcmToken = ''
-	$('pushTest').disabled = !isConnected()
+	$('pushTest').disabled = !isConnected() || !pushActive
 	$('pushState').textContent = 'Destino de notificação removido do ESP32.'
 }
 

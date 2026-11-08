@@ -380,6 +380,9 @@ bool firebaseConfigured() {
          firebasePrivateKey.indexOf("-----BEGIN PRIVATE KEY-----") >= 0 &&
          firebasePrivateKey.indexOf("-----END PRIVATE KEY-----") >= 0;
 }
+bool pushDeliveryConfigured() {
+  return firebaseConfigured() && !fcmTargetToken.isEmpty();
+}
 String signedJwt() {
   if (!firebaseConfigured() || !clockIsValid()) return "";
   time_t now = time(nullptr);
@@ -620,6 +623,7 @@ bool deliverPush(const String& title, const String& body) {
 void connectWiFiIfNeeded();
 
 void queuePush(const String& event, const String& text) {
+  if (!pushDeliveryConfigured()) return;
   if (pendingPushEvent.isEmpty()) {
     pendingPushEvent = event;
     pendingPushText = text;
@@ -685,7 +689,22 @@ void promoteNextPush() {
   pushNextAttempt = 0;
 }
 
+void clearQueuedPushes() {
+  pendingPushEvent = "";
+  pendingPushText = "";
+  for (uint8_t i = 0; i < PUSH_QUEUE_CAPACITY; i++) {
+    deferredPushes[i].event = "";
+    deferredPushes[i].text = "";
+  }
+  deferredPushCount = 0;
+  pushNextAttempt = 0;
+}
+
 void processPush() {
+  if (!pushDeliveryConfigured()) {
+    if (!pendingPushEvent.isEmpty() || deferredPushCount > 0) clearQueuedPushes();
+    return;
+  }
   if (pendingPushEvent.isEmpty() || (int32_t)(millis() - pushNextAttempt) < 0) return;
 
   // Primeiro inicia/continua a conexao Wi-Fi. O loop antigo tentava o FCM
@@ -719,7 +738,8 @@ void processPush() {
 }
 
 void processEmptyLoadReminder() {
-  if (!awaitingReload || portionsDispensed < PORTIONS_PER_LOAD || !clockIsValid()) return;
+  if (!pushDeliveryConfigured() || !awaitingReload ||
+      portionsDispensed < PORTIONS_PER_LOAD || !clockIsValid()) return;
   if (hasQueuedPush("EMPTY") || hasQueuedPush("EMPTY_REMINDER")) return;
 
   const uint32_t nowEpoch = static_cast<uint32_t>(time(nullptr));
@@ -1143,6 +1163,11 @@ void handleCommand(String cmd) {
     pendingFirebaseClientEmail = "";
     pendingFirebasePrivateKey = "";
     notifyBLE("OK: credenciais Firebase salvas.");
+    if (pushDeliveryConfigured()) {
+      queuePush("CONFIGURED_TEST", "Notificações configuradas!");
+    } else {
+      notifyPushLog("teste de confirmacao ignorado: destino FCM ainda nao configurado");
+    }
   } else if (key == "CAL_STEPS") {
     int n = value.toInt();
     if (n < 3900 || n > 4200) { notifyBLE("ERRO: CAL_STEPS aceita 3900..4200."); return; }
@@ -1187,6 +1212,10 @@ void handleCommand(String cmd) {
     notifyBLE("OK: destino FCM removido");
   } else if (key == "FCM_TEST") {
     notifyPushLog("comando FCM_TEST recebido");
+    if (!pushDeliveryConfigured()) {
+      notifyBLE("ERRO: configure o Firebase e ative notificacoes no PWA antes do teste.");
+      return;
+    }
     queuePush("TEST", "Teste de notificacao do BettaFeeder.");
     notifyBLE("OK: teste de push enfileirado");
   } else if (key == "CLEAR_WIFI") {
