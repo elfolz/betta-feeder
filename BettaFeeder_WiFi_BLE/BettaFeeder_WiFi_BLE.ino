@@ -62,6 +62,7 @@ static const uint8_t MOTOR_PINS[4] = {16, 17, 18, 19}; // ULN2003 IN1..IN4
 static const uint8_t DS18B20_PIN = 4;
 static const float LOW_TEMPERATURE_LIMIT_C = 22.0f;
 static const unsigned long TEMPERATURE_SAMPLE_MS = 2500;
+static const unsigned long LOW_TEMPERATURE_ALERT_INTERVAL_MS = 10UL * 60UL * 1000UL;
 // 28BYJ-48 varies by gearbox. Start at 4076 halfsteps/revolution;
 // CAL_STEPS=NNNN via BLE permits adjusting after physical testing.
 uint16_t halfStepsPerRev = 4076;
@@ -117,6 +118,7 @@ bool temperatureConversionPending = false;
 unsigned long temperatureConversionStarted = 0;
 unsigned long lastTemperatureRequest = 0;
 bool lowTemperatureAlertActive = false;
+unsigned long lastLowTemperatureAlert = 0;
 
 // ---------- Wi-Fi / clock ----------
 bool ntpConfigured = false;
@@ -773,16 +775,31 @@ void processTemperature() {
     float measured = temperatureSensor.getTempCByIndex(0);
     temperatureConversionPending = false;
     waterTemperatureC = measured;
-    if (measured == DEVICE_DISCONNECTED_C || !isfinite(measured)) return;
+    if (measured == DEVICE_DISCONNECTED_C || !isfinite(measured)) {
+      lowTemperatureAlertActive = false;
+      lastLowTemperatureAlert = 0;
+      if (pendingPushEvent == "TEMPERATURA_BAIXA") {
+        pendingPushEvent = "";
+        pendingPushText = "";
+      }
+      return;
+    }
 
-    if (measured < LOW_TEMPERATURE_LIMIT_C && !lowTemperatureAlertActive) {
+    if (measured < LOW_TEMPERATURE_LIMIT_C &&
+        (!lowTemperatureAlertActive || now - lastLowTemperatureAlert >= LOW_TEMPERATURE_ALERT_INTERVAL_MS)) {
       lowTemperatureAlertActive = true;
+      lastLowTemperatureAlert = now;
       String alertText = "Temperatura da agua baixa: " + String(measured, 1) +
         " °C. Limite: 22 °C.";
       notifyBLE(String("ALERTA_TEMPERATURA: ") + alertText);
       queuePush("TEMPERATURA_BAIXA", alertText);
     } else if (measured >= LOW_TEMPERATURE_LIMIT_C) {
       lowTemperatureAlertActive = false;
+      lastLowTemperatureAlert = 0;
+      if (pendingPushEvent == "TEMPERATURA_BAIXA") {
+        pendingPushEvent = "";
+        pendingPushText = "";
+      }
     }
   }
 

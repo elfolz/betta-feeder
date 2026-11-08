@@ -117,9 +117,17 @@ function setConnected(connected, name = 'BettaFeeder') {
 	$('deviceDescription').textContent = connected
 		? (connectionMode === 'serial' ? 'Conectado via USB Serial' : 'Conectado via Bluetooth Low Energy')
 		: 'Nenhum dispositivo conectado';
-	['saveTimesButton', 'saveWifiButton', 'statusButton', 'testFeedButton', 'homeButton'].forEach(id => $(id).disabled = !connected)
+	$('saveTimesButton').disabled = !connected
+	$('saveWifiButton').disabled = !connected
+	$('statusButton').disabled = !connected
+	$('testFeedButton').disabled = !connected
+	$('homeButton').disabled = !connected
 	$('reloadButton').disabled = true // enabled only after STATUS reports aguardando_recarga
-	['feed1', 'feed2', 'ssid', 'password', 'togglePassword'].forEach(id => $(id).disabled = !connected)
+	$('feed1').disabled = !connected
+	$('feed2').disabled = !connected
+	$('ssid').disabled = !connected
+	$('password').disabled = !connected
+	$('togglePassword').disabled = !connected
 	$('pushEnable').disabled = !connected
 	$('pushTest').disabled = !connected
 	const bluetoothButton = $('connectButton')
@@ -169,9 +177,15 @@ function parseDeviceMessage(message) {
 	$('wifiStatus').textContent = fields.wifi || '—'
 	const dateMatch = fields.data?.match(/^(\d{4})-(\d{2})-(\d{2})$/)
 	const arduinoDate = dateMatch
-		? `${dateMatch[3]}/${dateMatch[2]}/${dateMatch[1]}`
+		? `${dateMatch[3]}/${dateMatch[2]}/${dateMatch[1].slice(-2)}`
 		: fields.data
-	$('clockStatus').textContent = fields.hora && arduinoDate ? `${fields.hora} · ${arduinoDate}` : (fields.hora || '—')
+	const timeMatch = fields.hora?.match(/^(\d{2}:\d{2})(?::(\d{1,2}))?$/)
+	const arduinoTime = timeMatch
+		? `${timeMatch[1]}:${(timeMatch[2] || '00').padStart(2, '0')}`
+		: fields.hora
+	$('clockStatus').textContent = arduinoTime && arduinoDate
+		? `${arduinoTime} ${arduinoDate}`
+		: (arduinoTime || '—')
 	const batchMatch = fields.porcoes_lote?.match(/^(\d+)\/14$/)
 	const dispensed = batchMatch ? Number(batchMatch[1]) : null
 	const waitingForReload = fields.lote === 'aguardando_recarga'
