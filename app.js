@@ -31,6 +31,7 @@ let connectionMode = null
 let serialReadBuffer = ''
 let toastTimer = null
 let connectionInProgress = false
+let commandWriteQueue = Promise.resolve()
 let rxFragments = ''
 let statusRefreshTimer = null
 let feedReferenceReady = false
@@ -139,7 +140,22 @@ async function sendCommandAndWait(command, predicate, timeoutMs = 3000) {
 function errorMessage(error, fallback = 'Ocorreu um erro ao conectar ao Bluetooth.') {
 	if (error?.name === 'NotFoundError') return 'Nenhum dispositivo BettaFeeder foi selecionado.'
 	if (error?.name === 'SecurityError') return 'O dispositivo bloqueou o acesso ao Bluetooth.'
+	if (/connection already in progress/i.test(error?.message || '')) {
+		const stage = error?.connectionStage ? ` na etapa "${error.connectionStage}"` : ''
+		return `O navegador informou "Connection already in progress"${stage}.`
+	}
 	return error?.message || fallback
+}
+
+async function connectGatt(device, retries = 2) {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			return await device.gatt.connect()
+		} catch (error) {
+			if (!/connection already in progress/i.test(error?.message || '') || attempt >= retries) throw error
+			await new Promise(resolve => setTimeout(resolve, 700 * (attempt + 1)))
+		}
+	}
 }
 
 function setConnected(connected, name = 'BettaFeeder') {
@@ -185,7 +201,9 @@ function setConnected(connected, name = 'BettaFeeder') {
 	updatePushControl()
 	clearInterval(statusRefreshTimer)
 	statusRefreshTimer = connected ? setInterval(() => {
-		if (isConnected() && hasCommandTransport()) sendCommand('STATUS', true).catch(error => console.warn('Falha ao atualizar status:', error))
+		if (!connectionInProgress && isConnected() && hasCommandTransport()) {
+			sendCommand('STATUS', true).catch(error => console.warn('Falha ao atualizar status:', error))
+		}
 	}, 10000) : null
 }
 
@@ -301,6 +319,10 @@ async function connect() {
 	if (connectionInProgress) return
 	connectionInProgress = true
 	setConnectionLoading(true)
+	let connectionStage = 'seleção do dispositivo'
+	server = null
+	rxCharacteristic = null
+	txCharacteristic = null
 
 	try {
 		if (!('bluetooth' in navigator)) {
@@ -312,17 +334,32 @@ async function connect() {
 			filters: [{ services: [BLE.service] }]
 		})
 		device.addEventListener('gattserverdisconnected', onDisconnected)
-		server = await device.gatt.connect()
+		connectionStage = 'conexão GATT'
+		server = await connectGatt(device)
+		connectionStage = 'descoberta do serviço BLE'
 		const service = await server.getPrimaryService(BLE.service)
+		connectionStage = 'característica de escrita'
 		rxCharacteristic = await service.getCharacteristic(BLE.rx)
+		connectionStage = 'característica de notificações'
 		txCharacteristic = await service.getCharacteristic(BLE.tx)
-		await txCharacteristic.startNotifications()
+		connectionStage = 'ativação das notificações'
 		txCharacteristic.addEventListener('characteristicvaluechanged', onNotification)
+		await txCharacteristic.startNotifications()
 		setConnected(true, device.name || 'BettaFeeder')
 		log('Bluetooth conectado e notificações ativadas.', 'success')
 		toast('Conectado ao BettaFeeder')
+		connectionStage = 'envio do STATUS'
 		await sendCommand('STATUS')
 		void syncPushAuthorization()
+	} catch (error) {
+		const shouldDisconnect = Boolean(server?.connected)
+		error.connectionStage = connectionStage
+		rxCharacteristic = null
+		txCharacteristic = null
+		server = null
+		if (shouldDisconnect) device?.gatt?.disconnect()
+		setConnected(false)
+		throw error
 	} finally {
 		connectionInProgress = false
 		setConnectionLoading(false)
@@ -350,7 +387,7 @@ async function attachSerialPort(port, verifyDevice = false) {
 	connectionMode = 'serial'
 	setConnected(true, 'BettaFeeder')
 	$('serialConnectButton').querySelector('.serial-button-label').textContent = 'Desconectar USB Serial'
-	log('Serial conectada; Bluetooth será desativado pelo primeiro comando.', 'success')
+	log('Serial conectada; Bluetooth permanece ativo.', 'success')
 	void readSerialLoop()
 	if (verifyDevice) {
 		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
@@ -441,14 +478,6 @@ async function disconnect() {
 	if (device?.gatt?.connected) return device.gatt.disconnect()
 	if (serialConnected) {
 		const portToForget = serialPort
-		// BLE_ON clears the firmware's persistent serial mode and restarts BLE.
-		try {
-			log('Solicitando reativação do Bluetooth no ESP32...')
-			await sendCommand('BLE_ON')
-			await new Promise(resolve => setTimeout(resolve, 350))
-		} catch (error) {
-			console.warn('Não foi possível enviar BLE_ON antes de desconectar:', error)
-		}
 		serialConnected = false
 		try { await serialReader?.cancel() } catch (_) { }
 		try { serialWriter?.releaseLock() } catch (_) { }
@@ -466,15 +495,20 @@ async function disconnect() {
 }
 
 async function sendCommand(command, quiet = false) {
-	if (rxCharacteristic) {
-		// Firmware parses one command per GATT write. Write with response for reliability.
-		await rxCharacteristic.writeValueWithResponse(encoder.encode(command))
-	} else if (serialConnected && serialPort?.writable) {
-		if (!serialWriter) serialWriter = serialPort.writable.getWriter()
-		await serialWriter.write(encoder.encode(`${command}\n`))
-	} else {
-		throw new Error('Conecte ao BettaFeeder primeiro.')
+	const write = async () => {
+		if (rxCharacteristic) {
+			// Firmware parses one command per GATT write. Write with response for reliability.
+			await rxCharacteristic.writeValueWithResponse(encoder.encode(command))
+		} else if (serialConnected && serialPort?.writable) {
+			if (!serialWriter) serialWriter = serialPort.writable.getWriter()
+			await serialWriter.write(encoder.encode(`${command}\n`))
+		} else {
+			throw new Error('Conecte ao BettaFeeder primeiro.')
+		}
 	}
+	const pendingWrite = commandWriteQueue.then(write, write)
+	commandWriteQueue = pendingWrite.catch(() => { })
+	await pendingWrite
 	if (!quiet && !command.startsWith('FCM_ADD=') && !command.startsWith('PK_ADD=')) log(`Enviado: ${command}`)
 }
 

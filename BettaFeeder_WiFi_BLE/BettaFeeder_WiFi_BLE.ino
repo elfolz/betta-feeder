@@ -22,7 +22,7 @@
     RELOAD         // confirm refill in the PWA; resumes without moving the motor
     CAL_STEPS=4076 // gearbox calibration; requires SET_HOME afterwards
     CLEAR_WIFI
-    BLE_ON         // reativa BLE e reinicia o ESP32
+    BLE_ON         // comando legado; BLE permanece ativo
 
   Motor pins (ULN2003 IN1..IN4):
     IN1=GPIO16, IN2=GPIO17, IN3=GPIO18, IN4=GPIO19
@@ -91,7 +91,6 @@ static const char* TX_UUID      = "7f510003-1b15-4f0b-9a2e-5b8f6a100001";
 
 NimBLECharacteristic* txCharacteristic = nullptr;
 bool bleConnected = false;
-bool serialMode = false;
 
 portMUX_TYPE commandMux = portMUX_INITIALIZER_UNLOCKED;
 char pendingCommand[192] = {0};
@@ -237,7 +236,6 @@ void saveSettings() {
   prefs.putBool("homed", referenceValid);
   prefs.putBool("moving", motionInProgress);
   prefs.putUShort("steps", halfStepsPerRev);
-  prefs.putBool("serialMode", serialMode);
   // O token FCM e salvo apenas em FCM_SAVE/FCM_CLEAR.
 }
 
@@ -268,7 +266,6 @@ void loadSettings() {
   firebaseProjectId = prefs.getString("fbProject", "");
   firebaseClientEmail = prefs.getString("fbEmail", "");
   firebasePrivateKey = prefs.getString("fbKey", "");
-  serialMode = prefs.getBool("serialMode", false);
   wifiPASS = prefs.getString("pass", "");
   feedMinute[0] = prefs.getUShort("feed1", 8 * 60);
   feedMinute[1] = prefs.getUShort("feed2", 20 * 60);
@@ -956,10 +953,7 @@ void handleCommand(String cmd) {
   key.toUpperCase();
 
   if (key == "BLE_ON") {
-    prefs.putBool("serialMode", false);
-    notifyBLE("OK: BLE sera reativado apos reinicio");
-    delay(250);
-    ESP.restart();
+    notifyBLE("OK: BLE permanece ativo");
   } else if (key == "SSID" && value.length() > 0) {
     wifiSSID = value;
     saveSettings();
@@ -1232,18 +1226,6 @@ void handleCommand(String cmd) {
   }
 }
 
-void activateSerialMode() {
-  if (serialMode) return;
-  serialMode = true;
-  prefs.putBool("serialMode", true);
-  bleConnected = false;
-  txCharacteristic = nullptr;
-  // A porta serial recebeu um comando: encerra o stack BLE e libera a RAM
-  // usada pelo NimBLE antes de iniciar OAuth/TLS.
-  NimBLEDevice::deinit(true);
-  Serial.printf("OK: SERIAL ativo; BLE desativado; heap=%u\n", ESP.getFreeHeap());
-}
-
 void processSerialCommands() {
   static String serialBuffer;
   while (Serial.available() > 0) {
@@ -1253,7 +1235,6 @@ void processSerialCommands() {
       if (!serialBuffer.isEmpty()) {
         String command = serialBuffer;
         serialBuffer = "";
-        activateSerialMode();
         handleCommand(command);
       }
       continue;
@@ -1296,7 +1277,6 @@ static RxCallbacks rxCallbacks;
 
 void startBLE() {
   NimBLEDevice::init(BLE_DEVICE_NAME);
-  NimBLEDevice::setSecurityAuth(true, false, true);
   // O protocolo usa fragmentos de 18 bytes e funciona com MTU 23. Nao
   // solicite MTU 247, pois isso aumenta o consumo de memoria do BLE.
   NimBLEDevice::setMTU(23);
@@ -1309,8 +1289,10 @@ void startBLE() {
     TX_UUID, NIMBLE_PROPERTY::NOTIFY
   );
 
+  // Plain BLE writes are intentional for this private device. Configuration
+  // values, including Wi-Fi and Firebase credentials, are not encrypted over the radio.
   NimBLECharacteristic* rx = service->createCharacteristic(
-    RX_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_ENC
+    RX_UUID, NIMBLE_PROPERTY::WRITE
   );
   rx->setCallbacks(rxCallbacks);
 
@@ -1346,11 +1328,7 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
 
-  if (!serialMode) {
-    startBLE();
-  } else {
-    Serial.printf("SERIAL persistente: BLE nao inicializado; heap=%u\n", ESP.getFreeHeap());
-  }
+  startBLE();
 
   notifyBLE(referenceValid
     ? "BettaFeeder V6: posicao salva restaurada sem mover o motor."
