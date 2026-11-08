@@ -22,8 +22,8 @@ try {
 			const source = payload.notification || payload.data || {}
 			return self.registration.showNotification(source.title || 'BettaFeeder', {
 				body: source.body || 'Nova notificação',
-				icon: './icons/icon-192.png',
-				badge: './icons/icon-192.png',
+				icon: './icons/push-icon.png',
+				badge: './icons/push-icon.png',
 				tag: 'bettafeeder-push',
 				renotify: true
 			})
@@ -33,8 +33,8 @@ try {
 	console.warn('SDK de push indisponível:', error)
 }
 
-const CACHE_NAME = 'bettafeeder-pwa-v39'
-const ASSETS = ['./', './index.html', './styles.css', './app.js?v=39', './firebase-config.js', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png']
+const CACHE_NAME = 'bettafeeder-pwa-v40'
+const ASSETS = ['./', './index.html', './styles.css', './app.js?v=39', './firebase-config.js', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/push-icon.png']
 self.addEventListener('install', event => {
 	event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)))
 	self.skipWaiting()
