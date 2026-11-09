@@ -1,0 +1,232 @@
+﻿<!doctype html>
+<html lang="pt-BR">
+
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+	<meta name="theme-color" content="#121212">
+	<meta name="description" content="Conheça o BettaFeeder: alimentador automático de aquário com ESP32, horários programáveis e peças 3D imprimíveis.">
+	<title>BettaFeeder · Conheça o projeto</title>
+	<link rel="canonical" href="https://betta-feeder.elfolz.app.br/sobre.html">
+	<meta property="og:type" content="website">
+	<meta property="og:site_name" content="BettaFeeder">
+	<meta property="og:locale" content="pt_BR">
+	<meta property="og:url" content="https://betta-feeder.elfolz.app.br/sobre.html">
+	<meta property="og:title" content="BettaFeeder | Alimentação automática para aquários">
+	<meta property="og:description" content="Conheça o alimentador automático BettaFeeder: ESP32, horários programáveis, alertas e modelos imprimíveis em 3D.">
+	<meta property="og:image" content="https://betta-feeder.elfolz.app.br/images/og/projeto.png">
+	<meta property="og:image:type" content="image/png">
+	<meta property="og:image:width" content="1200">
+	<meta property="og:image:height" content="630">
+	<meta property="og:image:alt" content="Rotor do BettaFeeder em 3D ao lado do título Mais rotina. Mais tranquilidade.">
+	<meta name="twitter:card" content="summary_large_image">
+	<meta name="twitter:title" content="BettaFeeder | Alimentação automática para aquários">
+	<meta name="twitter:description" content="Conheça o alimentador automático BettaFeeder: ESP32, horários programáveis, alertas e modelos imprimíveis em 3D.">
+	<meta name="twitter:image" content="https://betta-feeder.elfolz.app.br/images/og/projeto.png">
+	<meta name="twitter:image:alt" content="Rotor do BettaFeeder em 3D ao lado do título Mais rotina. Mais tranquilidade.">
+	<link rel="manifest" href="./manifest.webmanifest">
+	<link rel="icon" href="./icons/icon-192.png">
+	<link rel="stylesheet" href="./styles.css">
+	<link rel="stylesheet" href="./landing-page.css">
+</head>
+
+<body>
+	<main class="app-shell landing-shell" id="top">
+		<header class="topbar">
+			<a class="brand" href="./" aria-label="BettaFeeder controle"><img class="brand-mark" src="./icons/icon-192.png"
+					alt="" aria-hidden="true"><span>BETTA<span class="brand-light">FEEDER</span></span></a>
+			<nav class="site-nav" aria-label="Navegação principal"><a class="nav-link active" href="./sobre.html"
+					aria-current="page">O projeto</a><a class="nav-link nav-cta" href="./">Abrir controle <span
+						aria-hidden="true">↗</span></a></nav>
+		</header>
+
+		<section class="landing-hero">
+			<div class="landing-copy">
+				<div class="eyebrow"><span class="pulse-dot"></span> AUTOMAÇÃO FEITA PARA O AQUÁRIO</div>
+				<h1>Mais rotina.<br><span>Mais tranquilidade.</span></h1>
+				<p>O BettaFeeder é um alimentador automático de ração seca, controlado por ESP32 e configurado pelo celular ou
+					computador. Ele libera as porções nos horários definidos e avisa quando precisa de atenção.</p>
+				<div class="hero-actions"><a class="button button-primary landing-button" href="./">Conhecer o controle <span
+							aria-hidden="true">→</span></a><a class="text-link" href="#modelos">Ver os modelos 3D <span
+							aria-hidden="true">↓</span></a></div>
+				<div class="hero-note"><span class="hero-note-icon">15</span><span><strong>14 porções por
+							carga</strong><small>Uma posição vazia protege a saída entre os ciclos.</small></span></div>
+			</div>
+			<figure class="hero-model">
+				<div class="hero-orbit orbit-one"></div>
+				<div class="hero-orbit orbit-two"></div><img src="./images/modelos/rotor.png"
+					alt="Render 3D do rotor de 15 posições do BettaFeeder">
+				<figcaption><span class="pulse-dot"></span> PROJETO MECÂNICO IMPRIMÍVEL</figcaption><span
+					class="hero-float-tag">ROTOR · 15 POSIÇÕES</span>
+			</figure>
+		</section>
+
+		<section class="intro-strip" aria-label="Resumo do projeto">
+			<div><strong>ESP32</strong><span>controle embarcado</span></div>
+			<div><strong>2 horários</strong><span>programação diária</span></div>
+			<div><strong>BLE + USB</strong><span>configuração local</span></div>
+			<div><strong>Peças 3D</strong><span>arquivos STL no projeto</span></div>
+		</section>
+
+		<section class="landing-section" id="como-funciona">
+			<div class="section-intro">
+				<div class="section-kicker">COMO FUNCIONA</div>
+				<h2>Uma rotina simples,<br><span>do ajuste à porção.</span></h2>
+				<p>O PWA configura o dispositivo. Depois, o ESP32 cuida dos horários mesmo quando o aplicativo está fechado.</p>
+			</div>
+			<div class="steps-grid">
+				<article class="step-card"><span class="step-index">01</span>
+					<div class="step-icon">⌁</div>
+					<h3>Conecte ao dispositivo</h3>
+					<p>Use Bluetooth Low Energy ou USB Serial para abrir a configuração local do alimentador.</p>
+				</article>
+				<article class="step-card"><span class="step-index">02</span>
+					<div class="step-icon">◷</div>
+					<h3>Configure a rotina</h3>
+					<p>Envie a rede Wi-Fi e defina dois horários. Com internet, o ESP32 acerta o relógio pelo NTP.</p>
+				</article>
+				<article class="step-card"><span class="step-index">03</span>
+					<div class="step-icon">⟳</div>
+					<h3>O rotor libera a ração</h3>
+					<p>Um motor de passo avança uma posição por acionamento e apresenta uma porção no ponto de saída.</p>
+				</article>
+				<article class="step-card"><span class="step-index">04</span>
+					<div class="step-icon">✓</div>
+					<h3>Receba os avisos</h3>
+					<p>Acompanhe o estado e receba alertas de recarga, temperatura ou eventos do alimentador.</p>
+				</article>
+			</div>
+		</section>
+
+		<section class="feature-band">
+			<div class="feature-copy">
+				<div class="section-kicker">CONTROLE E ACOMPANHAMENTO</div>
+				<h2>Informação útil,<br><span>sem complicar.</span></h2>
+				<p>O painel mostra o que importa para acompanhar o equipamento e manter a rotina em dia.</p><a class="text-link"
+					href="./">Ir para o painel de controle <span aria-hidden="true">→</span></a>
+			</div>
+			<div class="feature-list">
+				<div class="feature-item"><span class="feature-mark">01</span>
+					<div>
+						<h3>Status em tempo real</h3>
+						<p>Consulte porções restantes, temperatura da água, hora do ESP32 e conexão Wi-Fi.</p>
+					</div>
+				</div>
+				<div class="feature-item"><span class="feature-mark">02</span>
+					<div>
+						<h3>Acionamento e recarga</h3>
+						<p>Alimente manualmente, ajuste a posição inicial e confirme a recarga pelo PWA.</p>
+					</div>
+				</div>
+				<div class="feature-item"><span class="feature-mark">03</span>
+					<div>
+						<h3>Alertas e histórico</h3>
+						<p>Notificações push e os eventos recentes ajudam a identificar o que aconteceu.</p>
+					</div>
+				</div>
+				<div class="feature-item"><span class="feature-mark">04</span>
+					<div>
+						<h3>Configuração local</h3>
+						<p>A senha do Wi-Fi é enviada diretamente ao ESP32 e não é armazenada pelo PWA.</p>
+					</div>
+				</div>
+			</div>
+		</section>
+
+		<section class="landing-section models-section" id="modelos">
+			<div class="section-intro model-intro">
+				<div class="section-kicker">DO DIGITAL PARA A BANCADA</div>
+				<h2>Conheça as peças<br><span>do modelo 3D.</span></h2>
+				<p>Pré-visualizações renderizadas a partir dos arquivos STL incluídos no projeto. As caixas da eletrônica têm
+					duas opções de tamanho.</p>
+			</div>
+			<div class="model-grid">
+				<article class="model-card">
+					<div class="model-art"><img src="./images/modelos/rotor.png" alt="Modelo 3D do rotor com 15 cavidades"></div>
+					<div class="model-info"><span class="model-label">01 · DOSAGEM</span>
+						<h3>Rotor de 15 posições</h3>
+						<p>Quatorze cavidades recebem as porções. A décima quinta fica vazia e serve como posição de segurança na
+							saída.</p>
+					</div>
+				</article>
+				<article class="model-card">
+					<div class="model-art"><img src="./images/modelos/base.png" alt="Modelo 3D da base do alimentador"></div>
+					<div class="model-info"><span class="model-label">02 · ESTRUTURA</span>
+						<h3>Base</h3>
+						<p>Forma o suporte inferior para o conjunto rotativo do alimentador.</p>
+					</div>
+				</article>
+				<article class="model-card">
+					<div class="model-art"><img src="./images/modelos/suporte-motor.png" alt="Modelo 3D do suporte do motor">
+					</div>
+					<div class="model-info"><span class="model-label">03 · ACIONAMENTO</span>
+						<h3>Suporte do motor</h3>
+						<p>Estrutura que acomoda o motor de passo responsável por avançar o rotor.</p>
+					</div>
+				</article>
+				<article class="model-card">
+					<div class="model-art"><img src="./images/modelos/tampa.png" alt="Modelo 3D da tampa superior removível">
+					</div>
+					<div class="model-info"><span class="model-label">04 · PROTEÇÃO</span>
+						<h3>Tampa superior</h3>
+						<p>Peça removível que fecha e protege o conjunto do reservatório.</p>
+					</div>
+				</article>
+				<article class="model-card">
+					<div class="model-art"><img src="./images/modelos/presilha.png"
+							alt="Modelo 3D da presilha que fixa o alimentador ao aquário"></div>
+					<div class="model-info"><span class="model-label">05 &#183; FIXA&#199;&#195;O</span>
+						<h3>Presilha central</h3>
+						<p>Prende o alimentador ao aquário e sustenta o conjunto junto ao vidro.</p>
+					</div>
+				</article>
+				<article class="model-card">
+					<div class="model-art"><img src="./images/modelos/parafuso-presilha.png"
+							alt="Modelo 3D do parafuso que aperta a presilha contra o vidro do aquário"></div>
+					<div class="model-info"><span class="model-label">06 &#183; FIXA&#199;&#195;O</span>
+						<h3>Parafuso da presilha</h3>
+						<p>Aperta a presilha contra o vidro do aquário para deixar o alimentador mais firme.</p>
+					</div>
+				</article>
+				<article class="model-card">
+					<div class="model-art"><img src="./images/modelos/caixa-full-size.png"
+							alt="Modelo 3D da caixa para ESP32 de tamanho completo"></div>
+					<div class="model-info"><span class="model-label">07 · ELETRÔNICA</span>
+						<h3>Caixa Full Size</h3>
+						<p>Acomoda a placa ESP32 e o driver ULN2003 do motor.</p>
+					</div>
+				</article>
+				<article class="model-card">
+					<div class="model-art"><img src="./images/modelos/tampa-caixa.png"
+							alt="Modelo 3D da tampa deslizante da caixa do ESP32"></div>
+					<div class="model-info"><span class="model-label">08 &#183; CAIXA DA ELETR&#212;NICA</span>
+						<h3>Tampa deslizante</h3>
+						<p>Encaixa na caixa e fecha o compartimento da eletrônica.</p>
+					</div>
+				</article>
+				<article class="model-card">
+					<div class="model-art"><img src="./images/modelos/funil.png" alt="Modelo 3D do funil usado na recarga"></div>
+					<div class="model-info"><span class="model-label">09 &#183; RECARGA</span>
+						<h3>Funil</h3>
+						<p>Encaixa sobre o rotor e conduz a ração às cavidades durante a recarga.</p>
+					</div>
+				</article>
+			</div>
+			<p class="models-caption"><span>↗</span> Os modelos são componentes individuais do conjunto e podem ser impressos
+				em 3D.</p>
+		</section>
+
+		<section class="closing-cta">
+			<div>
+				<div class="section-kicker">PRONTO PARA CONFIGURAR?</div>
+				<h2>Seu aquário, no tempo certo.</h2>
+				<p>Conecte o BettaFeeder e configure os horários no painel.</p>
+			</div><a class="button button-primary landing-button" href="./">Abrir o controle <span
+					aria-hidden="true">→</span></a>
+		</section>
+		<footer><a href="./" class="footer-brand">BETTAFEEDER</a><span>Feito para cuidar no tempo certo.</span><a
+				href="#top" class="footer-top">Voltar ao topo ↑</a></footer>
+	</main>
+</body>
+
+</html>

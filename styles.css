@@ -892,3 +892,37 @@ footer {
 		font-size: 10px
 	}
 }
+
+.site-nav {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.nav-link {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 9px 13px;
+	border: 1px solid rgba(0, 255, 185, .23);
+	border-radius: 999px;
+	background: rgba(0, 255, 185, .05);
+	color: var(--mint);
+	font-size: 11px;
+	font-weight: 700;
+	text-decoration: none;
+	transition: background .2s, border-color .2s, color .2s;
+}
+
+.nav-link:hover {
+	border-color: rgba(0, 255, 185, .45);
+	background: rgba(0, 255, 185, .1);
+	color: #b1ffe9;
+}
+
+@media (max-width: 560px) {
+	.nav-link {
+		padding: 8px 10px;
+		font-size: 10px;
+	}
+}
