@@ -1579,10 +1579,10 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 };
 
 class RxCallbacks : public NimBLECharacteristicCallbacks {
-  uint8_t onWrite(NimBLECharacteristic* characteristic,
-                  NimBLEAttValue& value,
-                  NimBLEConnInfo& connInfo) override {
-    if (value.length() == 0) return 0;
+  void onWrite(NimBLECharacteristic* characteristic,
+               NimBLEConnInfo& connInfo) override {
+    NimBLEAttValue value = characteristic->getValue();
+    if (value.length() == 0) return;
     String command(value.c_str());
 
     portENTER_CRITICAL(&commandMux);
@@ -1592,7 +1592,6 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
     pendingCommand[n] = '\0';
     commandPending = true;
     portEXIT_CRITICAL(&commandMux);
-    return 0;
   }
 };
 
@@ -1605,7 +1604,7 @@ void startBLE() {
   // solicite MTU 247, pois isso aumenta o consumo de memoria do BLE.
   NimBLEDevice::setMTU(23);
   NimBLEServer* server = NimBLEDevice::createServer();
-  server->setCallbacks(serverCallbacks);
+  server->setCallbacks(&serverCallbacks, false);
 
   NimBLEService* service = server->createService(SERVICE_UUID);
 
@@ -1618,7 +1617,7 @@ void startBLE() {
   NimBLECharacteristic* rx = service->createCharacteristic(
     RX_UUID, NIMBLE_PROPERTY::WRITE
   );
-  rx->setCallbacks(rxCallbacks);
+  rx->setCallbacks(&rxCallbacks);
 
   service->start();
 
