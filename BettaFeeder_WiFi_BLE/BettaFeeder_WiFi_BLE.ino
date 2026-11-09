@@ -102,6 +102,7 @@ String wifiSSID;
 String wifiPASS;
 uint16_t feedMinute[2] = {8 * 60, 20 * 60};
 int lastFeedDate[2] = {0, 0};
+uint32_t lastFeedEpoch = 0; // hora da ultima porcao efetivamente concluida
 
 uint8_t rotorPosition = 0;     // 0 = empty safety pocket at outlet
 uint8_t portionsDispensed = 0; // 0..14
@@ -110,6 +111,8 @@ bool referenceValid = false; // restored after a clean reboot; cleared if motion
 bool motionInProgress = false; // persisted before motor starts
 bool feedInProgress = false;
 bool startupScheduleChecked = false;
+String lastScheduleBlockLog;
+bool clockAvailabilityLogged = false;
 OneWire oneWire(DS18B20_PIN);
 DallasTemperature temperatureSensor(&oneWire);
 float waterTemperatureC = DEVICE_DISCONNECTED_C;
@@ -162,6 +165,41 @@ static const unsigned long PUSH_WIFI_WAIT_MS = 5000;
 static const uint32_t EMPTY_REMINDER_INTERVAL_SECONDS = 60UL * 60UL;
 
 static const int LATE_GRACE_MINUTES = 30; // skip a missed meal after 30 min
+
+// Compact persistent ring buffer in NVS. Keeps the latest 32 diagnostic events.
+struct DeviceLogRecord { uint32_t epoch; char message[96]; };
+static const uint8_t DEVICE_LOG_CAPACITY = 32;
+uint8_t deviceLogNext = 0;
+uint8_t deviceLogCount = 0;
+
+String deviceLogKey(uint8_t index) { return String("log") + (index < 10 ? "0" : "") + String(index); }
+
+void saveDeviceLog(const String& message) {
+  DeviceLogRecord record{};
+  time_t now = time(nullptr);
+  if (now >= 1735689600) record.epoch = static_cast<uint32_t>(now);
+  String safe = message;
+  safe.replace("\n", " "); safe.replace("\r", " ");
+  safe.substring(0, sizeof(record.message) - 1).toCharArray(record.message, sizeof(record.message));
+  prefs.putBytes(deviceLogKey(deviceLogNext).c_str(), &record, sizeof(record));
+  deviceLogNext = (deviceLogNext + 1) % DEVICE_LOG_CAPACITY;
+  if (deviceLogCount < DEVICE_LOG_CAPACITY) deviceLogCount++;
+  prefs.putUChar("logNext", deviceLogNext);
+  prefs.putUChar("logCount", deviceLogCount);
+}
+
+void emitDeviceLogs() {
+  notifyBLE("LOGS_BEGIN");
+  uint8_t first = (deviceLogNext + DEVICE_LOG_CAPACITY - deviceLogCount) % DEVICE_LOG_CAPACITY;
+  for (uint8_t i = 0; i < deviceLogCount; i++) {
+    DeviceLogRecord record{};
+    uint8_t slot = (first + i) % DEVICE_LOG_CAPACITY;
+    if (prefs.getBytes(deviceLogKey(slot).c_str(), &record, sizeof(record)) != sizeof(record)) continue;
+    notifyBLE(String("LOG:") + String(record.epoch) + ":" + String(record.message));
+    delay(25);
+  }
+  notifyBLE("LOGS_DONE");
+}
 
 // ---------- Helpers ----------
 String twoDigits(int n) {
@@ -219,6 +257,7 @@ void notifyBLE(const String& message) {
 
 void notifyPushLog(const String& message) {
   // Nunca inclua o token FCM, a chave privada ou o corpo completo de credenciais.
+  saveDeviceLog(String("Push: ") + message);
   notifyBLE(String("PUSH: ") + message);
 }
 
@@ -230,6 +269,7 @@ void saveSettings() {
   prefs.putUShort("feed2", feedMinute[1]);
   prefs.putInt("last1", lastFeedDate[0]);
   prefs.putInt("last2", lastFeedDate[1]);
+  prefs.putUInt("lastFeed", lastFeedEpoch);
   prefs.putUChar("position", rotorPosition);
   prefs.putUChar("portions", portionsDispensed);
   prefs.putBool("reload", awaitingReload);
@@ -271,6 +311,13 @@ void loadSettings() {
   feedMinute[1] = prefs.getUShort("feed2", 20 * 60);
   lastFeedDate[0] = prefs.getInt("last1", 0);
   lastFeedDate[1] = prefs.getInt("last2", 0);
+  lastFeedEpoch = prefs.getUInt("lastFeed", 0);
+  if (prefs.getUChar("feedVer", 0) < 1) {
+    // Older firmware marked scheduled slots before attempting motor movement,
+    // so those dates cannot prove that a portion was actually dispensed.
+    lastFeedDate[0] = lastFeedDate[1] = 0;
+    prefs.putUChar("feedVer", 1);
+  }
   rotorPosition = prefs.getUChar("position", 0);
   portionsDispensed = prefs.getUChar("portions", 0);
   awaitingReload = prefs.getBool("reload", true);
@@ -746,18 +793,19 @@ void processEmptyLoadReminder() {
   queuePush("EMPTY_REMINDER", "O alimentador está sem porções. Reabasteça e confirme a recarga no App.");
 }
 
-void feedOnePortion(const char* source) {
-  if (feedInProgress || motionInProgress) { notifyBLE("BLOQUEADO: motor ocupado."); return; }
-  if (!referenceValid) { notifyBLE("BLOQUEADO: referencia desconhecida. Confira a posicao fisica e envie SET_HOME."); return; }
+bool feedOnePortion(const char* source) {
+  if (feedInProgress || motionInProgress) { saveDeviceLog(String("Alimentacao bloqueada (") + source + "): motor ocupado."); notifyBLE("BLOQUEADO: motor ocupado."); return false; }
+  if (!referenceValid) { saveDeviceLog(String("Alimentacao bloqueada (") + source + "): referencia desconhecida."); notifyBLE("BLOQUEADO: referencia desconhecida. Confira a posicao fisica e envie SET_HOME."); return false; }
   if (awaitingReload || portionsDispensed >= PORTIONS_PER_LOAD) {
+    saveDeviceLog(String("Alimentacao bloqueada (") + source + "): lote aguardando recarga.");
     notifyBLE("LOTE_VAZIO: alimentador parado. Reabasteca e confirme a recarga no PWA.");
-    return;
+    return false;
   }
   const bool firstFeedAfterReload = portionsDispensed == 0 && rotorPosition == PORTIONS_PER_LOAD;
   if (rotorPosition != portionsDispensed && !firstFeedAfterReload) {
     referenceValid = false;
     saveSettings();
-    notifyBLE("FALHA: indice inconsistente. Confira fisicamente e envie SET_HOME."); return;
+    notifyBLE("FALHA: indice inconsistente. Confira fisicamente e envie SET_HOME."); return false;
   }
   feedInProgress = true;
   // After refill at pocket 14, this scheduled feeding advances over the
@@ -766,8 +814,11 @@ void feedOnePortion(const char* source) {
   if (firstFeedAfterReload) rotateToNextPocket();
   rotateToNextPocket();
   portionsDispensed++;
+  time_t feedTime = time(nullptr);
+  lastFeedEpoch = feedTime >= 1735689600 ? static_cast<uint32_t>(feedTime) : 0;
   saveSettings();
   notifyBLE(String("ALIMENTACAO: ") + source + "; porcoes_no_lote=" + String(portionsDispensed) + "/14");
+  saveDeviceLog(String("Porcao aplicada (") + source + "); lote=" + String(portionsDispensed) + "/14.");
   queuePush("FEED_COMMANDED", "Ração fornecida, porção " + String(portionsDispensed) +
             "/14.");
   if (portionsDispensed == PORTIONS_PER_LOAD) {
@@ -778,6 +829,7 @@ void feedOnePortion(const char* source) {
     queuePush("EMPTY", "A última porção foi aplicada. Reabasteça o alimentador!");
   }
   feedInProgress = false;
+  return true;
 }
 
 void connectWiFiIfNeeded() {
@@ -816,38 +868,86 @@ void connectWiFiIfNeeded() {
 
 void processSchedule() {
   struct tm nowTm;
-  if (!clockIsValid(&nowTm)) return;
+  if (!clockIsValid(&nowTm)) {
+    if (!clockAvailabilityLogged) {
+      saveDeviceLog("Agendamento suspenso: aguardando sincronizacao do horario NTP.");
+      clockAvailabilityLogged = true;
+    }
+    return;
+  }
+  if (clockAvailabilityLogged) {
+    saveDeviceLog("Horario NTP sincronizado; agendamento ativo.");
+    clockAvailabilityLogged = false;
+  }
 
   int today = dateKey(nowTm);
   int currentMinute = nowTm.tm_hour * 60 + nowTm.tm_min;
 
-  // Do not replay meals that became due while the ESP32 was powered off.
-  // Future scheduled slots remain active as usual.
+  // A restart does not discard elapsed slots: compare each due slot with the
+  // persisted time of the last completed portion before deciding to feed.
   if (!startupScheduleChecked) {
-    for (int slot = 0; slot < 2; slot++) {
-      if (currentMinute >= feedMinute[slot]) lastFeedDate[slot] = today;
-    }
     startupScheduleChecked = true;
-    saveSettings();
-    return;
   }
 
-  if (!referenceValid || awaitingReload || motionInProgress) return;
+  if (!referenceValid || awaitingReload || motionInProgress) {
+    String reason = !referenceValid ? "referencia desconhecida" :
+      (awaitingReload ? "aguardando recarga" : "movimento em andamento");
+    for (int slot = 0; slot < 2; slot++) {
+      if (lastFeedDate[slot] != today && currentMinute >= feedMinute[slot]) {
+        String signature = String(slot) + ":" + reason + ":" + String(today);
+        if (signature != lastScheduleBlockLog) {
+          saveDeviceLog(String("Horario ") + (slot + 1) + " devido, mas bloqueado: " + reason + ".");
+          lastScheduleBlockLog = signature;
+        }
+      }
+    }
+    return;
+  }
   for (int slot = 0; slot < 2; slot++) {
     if (lastFeedDate[slot] == today) continue;
     if (currentMinute < feedMinute[slot]) continue;
 
-    int lateBy = currentMinute - feedMinute[slot];
-    lastFeedDate[slot] = today; // mark before motion to prevent repeat after reboot
-    saveSettings();
+    // If the latest completed feeding was at or after this slot today, that
+    // meal is already covered, including when it happened before a reboot.
+    bool coveredByLastFeeding = false;
+    String lastFeedClock;
+    if (lastFeedEpoch) {
+      struct tm lastFeedTm;
+      time_t lastFeedTime = static_cast<time_t>(lastFeedEpoch);
+      localtime_r(&lastFeedTime, &lastFeedTm);
+      if (dateKey(lastFeedTm) == today) {
+        lastFeedClock = twoDigits(lastFeedTm.tm_hour) + ":" + twoDigits(lastFeedTm.tm_min);
+        struct tm scheduledTm = nowTm;
+        scheduledTm.tm_hour = feedMinute[slot] / 60;
+        scheduledTm.tm_min = feedMinute[slot] % 60;
+        scheduledTm.tm_sec = 0;
+        time_t scheduledEpoch = mktime(&scheduledTm);
+        coveredByLastFeeding = lastFeedTime >= scheduledEpoch;
+      }
+    }
+    if (coveredByLastFeeding) {
+      lastFeedDate[slot] = today;
+      saveSettings();
+      saveDeviceLog(String("Horario ") + (slot + 1) + " ja atendido pela alimentacao salva as " +
+        lastFeedClock + "; sem repetir.");
+      continue;
+    }
 
+    int lateBy = currentMinute - feedMinute[slot];
     if (lateBy <= LATE_GRACE_MINUTES) {
-      feedOnePortion(slot == 0 ? "HORARIO_1" : "HORARIO_2");
+      saveDeviceLog(String("Disparo do horario ") + (slot + 1) + " as " + formatHHMM(feedMinute[slot]));
+      if (feedOnePortion(slot == 0 ? "HORARIO_1" : "HORARIO_2")) {
+        lastFeedDate[slot] = today;
+        saveSettings();
+      }
     } else {
       String missedMessage = String("Horario ") + (slot == 0 ? "1" : "2") +
         " perdido: atraso maior que 30 minutos; alimentacao ignorada.";
       notifyBLE(String("HORARIO_PERDIDO: ") + missedMessage);
+      saveDeviceLog(missedMessage);
       queuePush("HORARIO_PERDIDO", missedMessage);
+      lastFeedDate[slot] = today;
+      saveSettings();
     }
   }
 }
@@ -995,6 +1095,8 @@ void handleCommand(String cmd) {
     notifyBLE("OK: horarios salvos=" + formatHHMM(first) + "," + formatHHMM(second));
   } else if (key == "STATUS") {
     sendStatus();
+  } else if (key == "LOGS") {
+    emitDeviceLogs();
   } else if (key == "TEMP") {
     sendStatus();
   } else if (key == "FEED") {
@@ -1324,6 +1426,10 @@ void setup() {
   temperatureSensor.setWaitForConversion(false);
 
   loadSettings();
+  deviceLogNext = prefs.getUChar("logNext", 0) % DEVICE_LOG_CAPACITY;
+  deviceLogCount = prefs.getUChar("logCount", 0);
+  if (deviceLogCount > DEVICE_LOG_CAPACITY) deviceLogCount = DEVICE_LOG_CAPACITY;
+  saveDeviceLog("Reinicializacao do ESP32.");
 
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
@@ -1337,6 +1443,7 @@ void setup() {
     const String motionAlert = "Energia interrompida durante movimento do motor. Verifique o rotor e defina novamente a posicao inicial.";
     notifyBLE(String("ALERTA: ") + motionAlert);
     queuePush("MOVIMENTO_INTERROMPIDO", motionAlert);
+    saveDeviceLog(motionAlert);
   }
   if (!wifiSSID.isEmpty()) {
     lastWiFiAttempt = 0;

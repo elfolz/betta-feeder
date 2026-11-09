@@ -224,6 +224,20 @@ function setConnectionLoading(loading, mode = 'bluetooth') {
 }
 
 function parseDeviceMessage(message) {
+	if (message.startsWith('LOG:')) {
+		const match = message.match(/^LOG:(\d+):(.*)$/)
+		if (match) {
+			const epoch = Number(match[1])
+			const time = epoch ? new Date(epoch * 1000).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'medium' }) : 'sem horario NTP'
+			log(`[Histórico ${time}] ${match[2]}`)
+		}
+		return
+	}
+	if (message === 'LOGS_BEGIN' || message === 'LOGS_DONE') {
+		if (message === 'LOGS_BEGIN') log('Histórico salvo no ESP32:')
+		else log('Fim do histórico salvo no ESP32.', 'success')
+		return
+	}
 	log(`ESP32: ${message}`, 'success')
 	resolveBleResponse(message)
 	if (message.startsWith('ALIMENTACAO:')) {
@@ -350,6 +364,7 @@ async function connect() {
 		toast('Conectado ao BettaFeeder')
 		connectionStage = 'envio do STATUS'
 		await sendCommand('STATUS')
+		await sendCommand('LOGS', true)
 		void syncPushAuthorization()
 	} catch (error) {
 		const shouldDisconnect = Boolean(server?.connected)
@@ -394,6 +409,7 @@ async function attachSerialPort(port, verifyDevice = false) {
 	} else {
 		await sendCommand('STATUS')
 	}
+	await sendCommand('LOGS', true)
 	void syncPushAuthorization()
 }
 

@@ -192,7 +192,7 @@
 				<li><strong>Movimento interrompido</strong><span>Enviada ao iniciar se o ESP32 detectar que a energia foi interrompida durante o movimento. Confira o rotor e defina novamente a posição inicial.</span></li>
 				<li><strong>Horário perdido</strong><span>Enviada quando o ESP32 verifica o horário programado com mais de 30 minutos de atraso e ignora aquela alimentação.</span></li>
 				</ul>
-				<p class="helper small">Os avisos de horário perdido e movimento interrompido também aparecem no log se o PWA estiver conectado por Bluetooth ou USB. O envio de push precisa de permissão no navegador, destino FCM configurado, Wi-Fi e horário NTP válido. Se a rede ou o horário ainda não estiverem disponíveis, o ESP32 tenta enviar depois.</p>
+				<p class="helper small">O ESP32 guarda os 32 eventos mais recentes, incluindo inicialização, horário NTP, alimentação, horários ignorados e bloqueios. O PWA carrega esse histórico ao conectar por Bluetooth ou USB. O envio de push precisa de permissão no navegador, destino FCM configurado, Wi-Fi e horário NTP válido. Se a rede ou o horário ainda não estiverem disponíveis, o ESP32 tenta enviar depois.</p>
 			</div>
 		</section>
 
@@ -200,7 +200,7 @@
 			<div class="log-heading"><span>ATIVIDADE</span><button id="clearLogButton" class="text-button">Limpar</button>
 			</div>
 			<div id="log" class="log" role="log" aria-live="polite">
-				<div class="log-empty">Os eventos de conexão e configuração aparecerão aqui.</div>
+				<div class="log-empty">Os eventos locais aparecem aqui; o histórico do ESP32 carrega ao conectar.</div>
 			</div>
 		</section>
 
