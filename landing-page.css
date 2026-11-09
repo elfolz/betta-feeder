@@ -559,3 +559,103 @@
 	}
 }
 
+
+.model-downloads {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 7px;
+	margin-top: 14px;
+}
+.model-download {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	padding: 8px 10px;
+	border: 1px solid rgba(0,255,185,.18);
+	border-radius: 9px;
+	background: rgba(0,255,185,.045);
+	color: var(--mint);
+	font-size: 10px;
+	font-weight: 700;
+	text-decoration: none;
+	transition: background .2s,border-color .2s;
+}
+.model-download:hover {
+	border-color: rgba(0,255,185,.4);
+	background: rgba(0,255,185,.1);
+}
+.model-download span {
+	font-size: 13px;
+}
+.firmware-download {
+	display: flex;
+	align-items: center;
+	gap: 18px;
+	margin: 0 0 26px;
+	padding: 25px 28px;
+	border: 1px solid var(--line);
+	border-radius: 18px;
+	background: linear-gradient(140deg,rgba(255,255,255,.03),transparent 55%),var(--panel);
+}
+.firmware-mark {
+	flex: none;
+	display: grid;
+	place-items: center;
+	width: 54px;
+	height: 54px;
+	border: 1px solid rgba(0,255,185,.2);
+	border-radius: 15px;
+	background: rgba(0,255,185,.07);
+	color: var(--mint);
+	font: 10px 'DM Mono',monospace;
+}
+.firmware-copy {
+	flex: 1;
+	min-width: 0;
+}
+.firmware-copy h2 {
+	margin: 0 0 5px;
+	font-size: 17px;
+}
+.firmware-copy p {
+	margin: 0 0 7px;
+	color: var(--muted);
+	font-size: 11px;
+	line-height: 1.6;
+}
+.firmware-copy code {
+	color: #83908f;
+	font: 10px 'DM Mono',monospace;
+}
+.firmware-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	flex: none;
+	width: 220px;
+	text-align: center;
+	text-decoration: none;
+}
+@media(max-width:560px) {
+	.firmware-download {
+		flex-wrap: wrap;
+		gap: 13px;
+		padding: 20px;
+	}
+	.firmware-copy {
+		flex-basis: calc(100% - 70px);
+	}
+	.firmware-button {
+		width: 100%;
+		text-align: center;
+	}
+}
+
+.github-mark {
+	color: #d6dddf;
+	background: rgba(255,255,255,.06);
+	border-color: rgba(255,255,255,.16);
+	font-size: 13px;
+	font-weight: 700;
+}
