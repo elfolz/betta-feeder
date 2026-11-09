@@ -367,6 +367,46 @@ button.button-primary:disabled.is-loading .connect-spinner {
 	margin-top: 17px
 }
 
+.feeding-history {
+	margin-top: 20px;
+	padding-top: 17px;
+	border-top: 1px solid var(--line)
+}
+
+.feeding-history h3 {
+	margin: 0 0 12px;
+	font-size: 14px
+}
+
+.feeding-history-list {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+	display: grid;
+	gap: 8px
+}
+
+.feeding-history-list li {
+	padding: 11px 13px;
+	background: #17191d;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	color: var(--text);
+	font-size: 13px
+}
+
+.feeding-history-list .feed-success {
+	border-left: 3px solid var(--mint)
+}
+
+.feeding-history-list .feed-failure {
+	border-left: 3px solid #ff9299
+}
+
+.feeding-history-note {
+	margin-top: 12px
+}
+
 .time-grid {
 	display: grid;
 	grid-template-columns: 1fr 1fr;

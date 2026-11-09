@@ -8,7 +8,6 @@ const BLE = {
 const $ = (id) => document.getElementById(id)
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
-try { localStorage.clear() } catch (_) { }
 
 const firmwareFieldIds = [
 	'ssid', 'feed1', 'feed2', 'firebaseProjectId', 'firebaseClientEmail',
@@ -36,6 +35,8 @@ let rxFragments = ''
 let statusRefreshTimer = null
 let feedReferenceReady = false
 let feedTimesReceived = false
+let receivingFeedHistory = false
+let feedHistoryEpochs = []
 let firebaseSetupAlertShown = false
 const bleResponseWaiters = []
 
@@ -223,7 +224,66 @@ function setConnectionLoading(loading, mode = 'bluetooth') {
 	button.classList.toggle('button-danger', !loading && (serial ? serialConnected : Boolean(device?.gatt?.connected)))
 }
 
+function renderFeedHistory() {
+	const list = $('feedingHistoryList')
+	list.replaceChildren()
+	const reasonLabels = {
+		motor_busy: 'Motor ocupado',
+		position_unknown: 'Posição inicial não definida',
+		batch_empty: 'Lote vazio; recarga necessária',
+		position_mismatch: 'Posição do rotor inconsistente',
+		time_unavailable: 'Horário não sincronizado; agendamento suspenso',
+		movement_interrupted: 'Movimento interrompido; verifique possível travamento ou perda de energia',
+		schedule_too_late: 'Horário perdido: atraso acima de 30 minutos'
+	}
+	const ordered = [...feedHistoryEpochs].reverse()
+	$('feedingHistoryEmpty').hidden = ordered.length > 0
+	if (ordered.length === 0) $('feedingHistoryEmpty').textContent = 'Nenhuma alimentação registrada neste lote.'
+	ordered.forEach(record => {
+		const item = document.createElement('li')
+		const when = record.epoch
+			? new Date(record.epoch * 1000).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })
+			: 'Data e hora indisponíveis'
+		const portion = record.portion ? `Porção ${record.portion} · ` : ''
+		if (record.success) {
+			item.classList.add('feed-success')
+			item.textContent = `${portion}Alimentação concluída · ${when}`
+		} else {
+			item.classList.add('feed-failure')
+			item.textContent = `${portion}Não realizada: ${reasonLabels[record.reason] || 'motivo não informado'} · ${when}`
+		}
+		list.appendChild(item)
+	})
+	$('feedingHistory').hidden = false
+}
+
+async function requestFeedingHistory(showHistory = true) {
+	if (!isConnected() || !hasCommandTransport()) return
+	if (!showHistory && $('feedingHistory').hidden) return
+	$('feedingHistory').hidden = false
+	$('feedingHistoryEmpty').hidden = false
+	$('feedingHistoryEmpty').textContent = 'Carregando alimentações...'
+	await sendCommandAndWait('FEED_HISTORY', message => message === 'FEEDS_END', 15000)
+}
+
 function parseDeviceMessage(message) {
+	if (message === 'FEEDS_END') {
+		receivingFeedHistory = false
+		renderFeedHistory()
+	} else if (message.startsWith('FEEDS_BEGIN:')) {
+		receivingFeedHistory = true
+		feedHistoryEpochs = []
+	} else if (message.startsWith('FEED_EVENT:') && receivingFeedHistory) {
+		const [epochText, status, portionText, reason] = message.slice('FEED_EVENT:'.length).split(':')
+		const epoch = Number(epochText)
+		const portion = Number(portionText)
+		feedHistoryEpochs.push({
+			epoch: Number.isFinite(epoch) ? epoch : 0,
+			success: status === 'OK',
+			portion: Number.isFinite(portion) ? portion : 0,
+			reason: reason || ''
+		})
+	}
 	if (message.startsWith('LOG:')) {
 		const match = message.match(/^LOG:(\d+):(.*)$/)
 		if (match) {
@@ -247,6 +307,7 @@ function parseDeviceMessage(message) {
 			$('portionsStatus').textContent = String(Math.max(0, 14 - dispensed))
 			updateFeedButtonAvailability()
 		}
+		void requestFeedingHistory(false).catch(error => log(`Falha ao atualizar as alimentações: ${error?.message || error}`, 'error'))
 		return
 	}
 	if (!message.startsWith('STATUS;')) return
@@ -525,7 +586,7 @@ async function sendCommand(command, quiet = false) {
 	const pendingWrite = commandWriteQueue.then(write, write)
 	commandWriteQueue = pendingWrite.catch(() => { })
 	await pendingWrite
-	if (!quiet && !command.startsWith('FCM_ADD=') && !command.startsWith('PK_ADD=')) log(`Enviado: ${command}`)
+	if (!quiet && !command.startsWith('FCM_ADD=') && !command.startsWith('FCM_REMOVE_ADD=') && !command.startsWith('PK_ADD=')) log(`Enviado: ${command}`)
 }
 
 async function guarded(action) {
@@ -558,6 +619,7 @@ $('saveTimesButton').addEventListener('click', () => guarded(async () => {
 		`TIMES=${first},${second}`,
 		message => message.startsWith('OK: horarios salvos=') || message.startsWith('ERRO:')
 	)
+	await requestFeedingHistory()
 	toast('Horários enviados ao ESP32')
 }))
 
@@ -687,11 +749,13 @@ $('testFeedButton').addEventListener('click', () => guarded(async () => {
 $('homeButton').addEventListener('click', () => guarded(async () => {
 	if (!await confirmAction('Definir posição inicial', 'Confirma que a cavidade vazia está fisicamente alinhada com a saída?')) return
 	await sendCommand('SET_HOME')
+	await requestFeedingHistory(false)
 }))
 $('reloadButton').addEventListener('click', () => guarded(async () => {
 	if (!await confirmAction('Confirmar recarga', 'Confirma que a recarga foi concluída? O ESP32 vai estacionar o rotor e liberar as próximas alimentações.')) return
 	await sendCommand('RELOAD')
 	await sendCommand('STATUS', true)
+	await requestFeedingHistory(false)
 }))
 $('clearLogButton').addEventListener('click', () => {
 	$('log').innerHTML = '<div class="log-empty">Os eventos de conexão e configuração aparecerão aqui.</div>'
@@ -717,9 +781,16 @@ window.addEventListener('load', () => {
 
 // FCM Web: envia o token em blocos pequenos, compatíveis com BLE MTU 23.
 let currentFcmToken = ''
+const pairedFcmTokenKey = 'bettafeeder-paired-fcm-token'
+const fcmRemovalPendingKey = 'bettafeeder-fcm-removal-pending'
+const pushDisabledKey = 'bettafeeder-push-disabled'
 let fbMessaging = null
 let messageListenerRegistered = false
-let pushActive = 'Notification' in window && Notification.permission === 'granted'
+let pushActive = 'Notification' in window && Notification.permission === 'granted' && (() => {
+	try {
+		return Boolean(localStorage.getItem(pairedFcmTokenKey)) && localStorage.getItem(pushDisabledKey) !== 'true'
+	} catch (_) { return false }
+})()
 let pushTransitioning = false
 
 function firebaseWebConfigured() {
@@ -739,9 +810,9 @@ async function enablePushNotifications() {
 		: await Notification.requestPermission()
 	updatePushControl()
 	if (permission !== 'granted') {
-		await clearPairedFcmToken()
 		throw new Error('Permissão de notificação negada.')
 	}
+	try { localStorage.removeItem(pushDisabledKey) } catch (_) { }
 	if (!window.firebase?.messaging?.isSupported) throw new Error('Firebase SDK não carregado.')
 	if (!await firebase.messaging.isSupported()) throw new Error('FCM não suportado neste dispositivo.')
 	if (!firebase.apps.length) firebase.initializeApp(window.BETTA_FIREBASE_CONFIG)
@@ -754,8 +825,7 @@ async function enablePushNotifications() {
 	})
 	if (!token) throw new Error('Firebase não forneceu token de registro.')
 	currentFcmToken = token
-	pushActive = true
-	$('pushState').textContent = 'Push ativo neste dispositivo. O registro no ESP32 ocorre automaticamente quando conectado.'
+	try { localStorage.setItem(pairedFcmTokenKey, token) } catch (_) { }
 	$('pushTest').disabled = !isConnected()
 	if (!messageListenerRegistered) {
 		messageListenerRegistered = true
@@ -768,6 +838,10 @@ async function enablePushNotifications() {
 		})
 	}
 	if (isConnected()) await pairFcmToken()
+	pushActive = true
+	$('pushState').textContent = isConnected()
+		? 'Push ativo neste dispositivo e registrado no ESP32.'
+		: 'Push ativo neste dispositivo. O registro no ESP32 ocorre ao conectar.'
 	updatePushControl()
 }
 
@@ -800,9 +874,11 @@ function updatePushControl() {
 async function disablePushNotifications() {
 	pushActive = false
 	updatePushControl()
+	try { localStorage.setItem(pushDisabledKey, 'true') } catch (_) { }
+	try { localStorage.setItem(fcmRemovalPendingKey, 'true') } catch (_) { }
+	if (isConnected() && hasCommandTransport()) await removePairedFcmDevice()
 	if (fbMessaging && currentFcmToken) await fbMessaging.deleteToken()
 	currentFcmToken = ''
-	await clearPairedFcmToken()
 	$('pushState').textContent = 'Notificações desativadas neste dispositivo. A permissão do navegador continua concedida.'
 	$('pushTest').disabled = !isConnected()
 	updatePushControl()
@@ -836,24 +912,55 @@ if (typeof navigator.permissions?.query === 'function') {
 
 let fcmPairPromise = null
 
+async function removePairedFcmDevice() {
+	if (!isConnected() || !hasCommandTransport()) throw new Error('Conecte ao firmware para remover este dispositivo.')
+	let token = currentFcmToken
+	if (!token) {
+		try { token = localStorage.getItem(pairedFcmTokenKey) || '' } catch (_) { }
+	}
+	if (!token) throw new Error('Token deste dispositivo não encontrado no navegador.')
+	if (token.length > 512) throw new Error('Token FCM acima do limite de 512 caracteres.')
+	const beginAck = await sendCommandAndWait(
+		`FCM_REMOVE_BEGIN=${token.length}`,
+		message => message === 'OK: FCM_REMOVE_BEGIN' || message.startsWith('ERRO:')
+	)
+	if (beginAck.startsWith('ERRO:')) throw new Error(beginAck)
+	for (let i = 0; i < token.length; i += 12) {
+		await sendCommand(`FCM_REMOVE_ADD=${token.slice(i, i + 12)}`)
+		await new Promise(resolve => setTimeout(resolve, 100))
+	}
+	const removeAck = await sendCommandAndWait(
+		'FCM_REMOVE',
+		message => message === 'OK: dispositivo FCM removido' || message.startsWith('ERRO:')
+	)
+	if (removeAck.startsWith('ERRO:')) throw new Error(removeAck)
+	currentFcmToken = ''
+	try {
+		localStorage.removeItem(pairedFcmTokenKey)
+		localStorage.removeItem(fcmRemovalPendingKey)
+	} catch (_) { }
+}
+
 function pairFcmToken() {
 	if (fcmPairPromise) return fcmPairPromise
 	fcmPairPromise = (async () => {
 		if (!currentFcmToken || !hasCommandTransport()) return
 		if (currentFcmToken.length > 512) throw new Error('Token FCM acima do limite de 512 caracteres.')
 		const token = currentFcmToken
-		await sendCommandAndWait(
+		const beginAck = await sendCommandAndWait(
 			`FCM_BEGIN=${token.length}`,
 			message => message === 'OK: FCM_BEGIN' || message.startsWith('ERRO:')
 		)
+		if (beginAck.startsWith('ERRO:')) throw new Error(beginAck)
 		for (let i = 0; i < token.length; i += 12) {
 			await sendCommand(`FCM_ADD=${token.slice(i, i + 12)}`)
 			await new Promise(resolve => setTimeout(resolve, 100))
 		}
-		await sendCommandAndWait(
+		const saveAck = await sendCommandAndWait(
 			'FCM_SAVE',
 			message => message === 'OK: destino FCM salvo' || message.startsWith('ERRO:')
 		)
+		if (saveAck.startsWith('ERRO:')) throw new Error(saveAck)
 		$('pushTest').disabled = false
 		$('pushState').textContent = 'Destino enviado ao ESP32. Use Notificação de teste.'
 		await new Promise(resolve => setTimeout(resolve, 250))
@@ -866,31 +973,32 @@ function pairFcmToken() {
 	return fcmPairPromise
 }
 
-async function clearPairedFcmToken() {
-	if (!isConnected() || !hasCommandTransport()) return
-	await sendCommandAndWait(
-		'FCM_CLEAR',
-		message => message === 'OK: destino FCM removido' || message.startsWith('ERRO:')
-	)
-	currentFcmToken = ''
-	$('pushTest').disabled = !isConnected() || !pushActive
-	$('pushState').textContent = 'Destino de notificação removido do ESP32.'
-}
-
 async function syncPushAuthorization() {
 	if (!isConnected()) return
+	let removalPending = false
+	let hasPairedToken = false
+	try {
+		removalPending = localStorage.getItem(fcmRemovalPendingKey) === 'true'
+		hasPairedToken = Boolean(localStorage.getItem(pairedFcmTokenKey))
+	} catch (_) { }
 	if (!('Notification' in window) || Notification.permission !== 'granted') {
 		pushActive = false
 		updatePushControl()
-		try { await clearPairedFcmToken() }
-		catch (error) { log(`Falha ao remover o destino FCM: ${error?.message || error}`, 'error') }
+		if (hasPairedToken && !removalPending) {
+			try { localStorage.setItem(fcmRemovalPendingKey, 'true') } catch (_) { }
+			removalPending = true
+		}
+		if (removalPending) {
+			try { await removePairedFcmDevice() }
+			catch (error) { log(`Falha ao remover este dispositivo do firmware: ${error?.message || error}`, 'error') }
+		}
 		return
 	}
-	if (!pushActive) {
-		try { await clearPairedFcmToken() }
-		catch (error) { log(`Falha ao remover o destino FCM: ${error?.message || error}`, 'error') }
-		return
+	if (removalPending) {
+		try { await removePairedFcmDevice() }
+		catch (error) { log(`Falha ao remover este dispositivo do firmware: ${error?.message || error}`, 'error'); return }
 	}
+	if (!pushActive) return
 	try {
 		await enablePushNotifications()
 	} catch (error) {

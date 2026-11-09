@@ -106,6 +106,17 @@ uint32_t lastFeedEpoch = 0; // hora da ultima porcao efetivamente concluida
 
 uint8_t rotorPosition = 0;     // 0 = empty safety pocket at outlet
 uint8_t portionsDispensed = 0; // 0..14
+uint32_t batchFeedEpochs[PORTIONS_PER_LOAD] = {0};
+struct FeedHistoryRecord {
+  uint32_t epoch;
+  uint8_t success;
+  uint8_t portion;
+  char reason[40];
+};
+static const uint8_t FEED_HISTORY_CAPACITY = 32;
+FeedHistoryRecord feedHistory[FEED_HISTORY_CAPACITY] = {};
+uint8_t feedHistoryNext = 0;
+uint8_t feedHistoryCount = 0;
 bool awaitingReload = true; // fail-safe until a load is explicitly confirmed
 bool referenceValid = false; // restored after a clean reboot; cleared if motion was interrupted
 bool motionInProgress = false; // persisted before motor starts
@@ -132,9 +143,12 @@ bool wifiConnecting = false;
 static const unsigned long WIFI_RETRY_MS = 30000;
 static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
 unsigned long wifiAttemptStarted = 0;
-// FCM: token da instalacao web vinculado via BLE
-String fcmTargetToken;
+// FCM: varios navegadores podem receber notificacoes do mesmo alimentador.
+static const uint8_t FCM_DEVICE_CAPACITY = 5;
+String fcmTargetTokens[FCM_DEVICE_CAPACITY];
+uint8_t fcmTargetCount = 0;
 String pendingFcmToken;
+bool pendingFcmRemoval = false;
 size_t expectedFcmLength = 0;
 String firebaseProjectId;
 String firebaseClientEmail;
@@ -162,7 +176,12 @@ unsigned long lastPushWifiLog = 0;
 uint32_t lastEmptyReminderEpoch = 0;
 static const unsigned long PUSH_RETRY_MS = 60000;
 static const unsigned long PUSH_WIFI_WAIT_MS = 5000;
+static const unsigned long FCM_VALIDATION_INTERVAL_MS = 24UL * 60UL * 60UL * 1000UL;
+static const unsigned long FCM_VALIDATION_RETRY_MS = 15UL * 60UL * 1000UL;
+unsigned long nextFcmValidationAt = 0;
 static const uint32_t EMPTY_REMINDER_INTERVAL_SECONDS = 60UL * 60UL;
+
+void connectWiFiIfNeeded();
 
 static const int LATE_GRACE_MINUTES = 30; // skip a missed meal after 30 min
 
@@ -173,6 +192,54 @@ uint8_t deviceLogNext = 0;
 uint8_t deviceLogCount = 0;
 
 String deviceLogKey(uint8_t index) { return String("log") + (index < 10 ? "0" : "") + String(index); }
+String batchFeedKey(uint8_t index) { return String("feedTs") + index; }
+String feedHistoryKey(uint8_t index) { return String("feedEvt") + (index < 10 ? "0" : "") + String(index); }
+
+void appendFeedHistory(bool success, const char* reason, uint8_t portion = 0, uint32_t epoch = 0xFFFFFFFFUL) {
+  if (epoch == 0xFFFFFFFFUL) {
+    time_t now = time(nullptr);
+    if (now >= 1735689600) epoch = static_cast<uint32_t>(now);
+  }
+  FeedHistoryRecord record{};
+  record.epoch = epoch;
+  record.success = success ? 1 : 0;
+  record.portion = portion;
+  String(reason).substring(0, sizeof(record.reason) - 1).toCharArray(record.reason, sizeof(record.reason));
+  feedHistory[feedHistoryNext] = record;
+  prefs.putBytes(feedHistoryKey(feedHistoryNext).c_str(), &record, sizeof(record));
+  feedHistoryNext = (feedHistoryNext + 1) % FEED_HISTORY_CAPACITY;
+  if (feedHistoryCount < FEED_HISTORY_CAPACITY) feedHistoryCount++;
+  prefs.putUChar("feedNext", feedHistoryNext);
+  prefs.putUChar("feedCount", feedHistoryCount);
+}
+
+void clearBatchFeedHistory() {
+  feedHistoryNext = 0;
+  feedHistoryCount = 0;
+  for (uint8_t i = 0; i < FEED_HISTORY_CAPACITY; i++) {
+    feedHistory[i] = FeedHistoryRecord{};
+    prefs.remove(feedHistoryKey(i).c_str());
+  }
+  prefs.putUChar("feedNext", 0);
+  prefs.putUChar("feedCount", 0);
+  for (uint8_t i = 0; i < PORTIONS_PER_LOAD; i++) {
+    batchFeedEpochs[i] = 0;
+    prefs.putUInt(batchFeedKey(i).c_str(), 0);
+  }
+}
+
+void emitBatchFeedHistory() {
+  notifyBLE(String("FEEDS_BEGIN:") + feedHistoryCount);
+  uint8_t first = (feedHistoryNext + FEED_HISTORY_CAPACITY - feedHistoryCount) % FEED_HISTORY_CAPACITY;
+  for (uint8_t i = 0; i < feedHistoryCount; i++) {
+    uint8_t slot = (first + i) % FEED_HISTORY_CAPACITY;
+    const FeedHistoryRecord& record = feedHistory[slot];
+    notifyBLE(String("FEED_EVENT:") + record.epoch + ":" + (record.success ? "OK" : "FAIL") +
+      ":" + record.portion + ":" + record.reason);
+    delay(25);
+  }
+  notifyBLE("FEEDS_END");
+}
 
 void saveDeviceLog(const String& message) {
   DeviceLogRecord record{};
@@ -276,33 +343,66 @@ void saveSettings() {
   prefs.putBool("homed", referenceValid);
   prefs.putBool("moving", motionInProgress);
   prefs.putUShort("steps", halfStepsPerRev);
-  // O token FCM e salvo apenas em FCM_SAVE/FCM_CLEAR.
+  // Tokens FCM sao mantidos separadamente em fcm0..fcm4.
 }
 
-bool replaceFcmToken(const String& newToken) {
-  // putString substitui a entrada existente no NVS. A leitura de volta
-  // confirma que a nova chave foi realmente persistida antes de usa-la.
-  const size_t written = prefs.putString("fcmToken", newToken);
-  if (written != newToken.length()) {
-    Serial.printf("FCM: falha ao salvar token (%u/%u bytes)\n",
-                  (unsigned)written, (unsigned)newToken.length());
-    return false;
-  }
+String fcmDeviceKey(uint8_t index) { return String("fcm") + index; }
 
-  const String savedToken = prefs.getString("fcmToken", "");
-  if (savedToken != newToken) {
-    Serial.println("FCM: validacao do token persistido falhou");
-    return false;
+bool saveFcmDevices() {
+  for (uint8_t i = 0; i < FCM_DEVICE_CAPACITY; i++) {
+    if (i < fcmTargetCount) {
+      const size_t written = prefs.putString(fcmDeviceKey(i).c_str(), fcmTargetTokens[i]);
+      if (written != fcmTargetTokens[i].length() || prefs.getString(fcmDeviceKey(i).c_str(), "") != fcmTargetTokens[i]) return false;
+    } else prefs.remove(fcmDeviceKey(i).c_str());
   }
-
-  fcmTargetToken = savedToken;
+  prefs.putUChar("fcmCount", fcmTargetCount);
+  prefs.remove("fcmToken"); // remove legado de token unico apos migracao
   return true;
+}
+
+bool upsertFcmToken(const String& newToken) {
+  for (uint8_t i = 0; i < fcmTargetCount; i++) if (fcmTargetTokens[i] == newToken) return true;
+  if (fcmTargetCount >= FCM_DEVICE_CAPACITY) return false;
+  fcmTargetTokens[fcmTargetCount++] = newToken;
+  if (saveFcmDevices()) return true;
+  fcmTargetTokens[--fcmTargetCount] = "";
+  return false;
+}
+
+bool removeFcmToken(const String& token) {
+  for (uint8_t i = 0; i < fcmTargetCount; i++) {
+    if (fcmTargetTokens[i] != token) continue;
+    for (uint8_t j = i + 1; j < fcmTargetCount; j++) fcmTargetTokens[j - 1] = fcmTargetTokens[j];
+    fcmTargetTokens[--fcmTargetCount] = "";
+    return saveFcmDevices();
+  }
+  return true;
+}
+
+bool hasFcmDevices() { return fcmTargetCount > 0; }
+
+void clearQueuedPushes();
+
+void clearFirebaseCredentialsIfNoDevices() {
+  if (hasFcmDevices()) return;
+  bool hadCredentials = !firebaseProjectId.isEmpty() || !firebaseClientEmail.isEmpty() || !firebasePrivateKey.isEmpty();
+  clearQueuedPushes();
+  firebaseProjectId = ""; firebaseClientEmail = ""; firebasePrivateKey = "";
+  prefs.remove("fbProject"); prefs.remove("fbEmail"); prefs.remove("fbKey");
+  oauthAccessToken = ""; oauthExpiresAtMs = 0;
+  if (hadCredentials) notifyPushLog("nenhum dispositivo FCM cadastrado; credenciais Firebase apagadas");
 }
 
 void loadSettings() {
   prefs.begin("bettafeed", false);
   wifiSSID = prefs.getString("ssid", "");
-  fcmTargetToken = prefs.getString("fcmToken", "");
+  fcmTargetCount = prefs.getUChar("fcmCount", 0);
+  if (fcmTargetCount > FCM_DEVICE_CAPACITY) fcmTargetCount = 0;
+  for (uint8_t i = 0; i < fcmTargetCount; i++) fcmTargetTokens[i] = prefs.getString(fcmDeviceKey(i).c_str(), "");
+  if (fcmTargetCount == 0) {
+    String legacyToken = prefs.getString("fcmToken", "");
+    if (!legacyToken.isEmpty()) { fcmTargetTokens[0] = legacyToken; fcmTargetCount = 1; saveFcmDevices(); }
+  }
   firebaseProjectId = prefs.getString("fbProject", "");
   firebaseClientEmail = prefs.getString("fbEmail", "");
   firebasePrivateKey = prefs.getString("fbKey", "");
@@ -320,6 +420,17 @@ void loadSettings() {
   }
   rotorPosition = prefs.getUChar("position", 0);
   portionsDispensed = prefs.getUChar("portions", 0);
+  for (uint8_t i = 0; i < PORTIONS_PER_LOAD; i++) batchFeedEpochs[i] = prefs.getUInt(batchFeedKey(i).c_str(), 0);
+  feedHistoryNext = prefs.getUChar("feedNext", 0) % FEED_HISTORY_CAPACITY;
+  feedHistoryCount = prefs.getUChar("feedCount", 0);
+  if (feedHistoryCount > FEED_HISTORY_CAPACITY) feedHistoryCount = FEED_HISTORY_CAPACITY;
+  for (uint8_t i = 0; i < FEED_HISTORY_CAPACITY; i++) {
+    prefs.getBytes(feedHistoryKey(i).c_str(), &feedHistory[i], sizeof(FeedHistoryRecord));
+  }
+  if (feedHistoryCount == 0) {
+    uint8_t previousFeeds = portionsDispensed > PORTIONS_PER_LOAD ? PORTIONS_PER_LOAD : portionsDispensed;
+    for (uint8_t i = 0; i < previousFeeds; i++) appendFeedHistory(true, "success", i + 1, batchFeedEpochs[i]);
+  }
   awaitingReload = prefs.getBool("reload", true);
   lastEmptyReminderEpoch = prefs.getUInt("emptyReminder", 0);
   motionInProgress = prefs.getBool("moving", false);
@@ -425,7 +536,7 @@ bool firebaseConfigured() {
          firebasePrivateKey.indexOf("-----END PRIVATE KEY-----") >= 0;
 }
 bool pushDeliveryConfigured() {
-  return firebaseConfigured() && !fcmTargetToken.isEmpty();
+  return firebaseConfigured() && hasFcmDevices();
 }
 String signedJwt() {
   if (!firebaseConfigured() || !clockIsValid()) return "";
@@ -589,8 +700,10 @@ String oauthToken() {
   notifyPushLog(oauthAccessToken.isEmpty() ? "OAuth: resposta sem access_token" : "OAuth: access token obtido");
   return oauthAccessToken;
 }
-bool deliverPush(const String& title, const String& body) {
-  if (fcmTargetToken.isEmpty()) {
+bool deliverPushToToken(const String& title, const String& body, const String& targetToken,
+                        bool& tokenInvalid, bool validateOnly = false) {
+  tokenInvalid = false;
+  if (!hasFcmDevices()) {
     notifyPushLog("envio bloqueado: token FCM vazio");
     return false;
   }
@@ -606,7 +719,7 @@ bool deliverPush(const String& title, const String& body) {
     notifyPushLog("envio aguardando: horario NTP invalido");
     return false;
   }
-  notifyPushLog("iniciando envio FCM");
+  notifyPushLog(validateOnly ? "validando destino FCM" : "iniciando envio FCM");
   String token = oauthToken();
   if (token.isEmpty()) {
     notifyPushLog("envio abortado: OAuth sem token");
@@ -626,7 +739,10 @@ bool deliverPush(const String& title, const String& body) {
   http.addHeader("Content-Type", "application/json; charset=utf-8");
   // Mensagem data-only: o onBackgroundMessage do Firebase no Service Worker
   // exibe a notificacao nativa mesmo quando a aba estiver fechada.
-  String payload = "{\"message\":{\"token\":\"" + jsonEscape(fcmTargetToken) +
+  String payload = validateOnly
+    ? "{\"validate_only\":true,\"message\":{\"token\":\""
+    : "{\"message\":{\"token\":\"";
+  payload += jsonEscape(targetToken) +
             "\",\"data\":{\"title\":\"" + jsonEscape(title) +
             "\",\"body\":\"" + jsonEscape(body) +
             "\"},\"webpush\":{\"headers\":{\"Urgency\":\"high\"}}}}";
@@ -654,6 +770,10 @@ bool deliverPush(const String& title, const String& body) {
     }
   }
   if (code == 401) { oauthAccessToken = ""; oauthExpiresAtMs = 0; }
+  tokenInvalid = (code == 404 &&
+    (response.indexOf("UNREGISTERED") >= 0 || response.indexOf("registration-token-not-registered") >= 0)) ||
+    (code == 400 && response.indexOf("google.firebase.fcm.v1.FcmError") >= 0 &&
+     response.indexOf("INVALID_ARGUMENT") >= 0);
   Serial.printf("FCM: envio HTTP %d\n", code);
   notifyPushLog(String("FCM HTTP ") + code);
   if (code != 200) {
@@ -663,8 +783,72 @@ bool deliverPush(const String& title, const String& body) {
   }
   return code == 200;
 }
+
+bool deliverPush(const String& title, const String& body) {
+  if (!hasFcmDevices()) return false;
+  bool allActiveDevicesDelivered = true;
+  uint8_t count = fcmTargetCount;
+  String invalidTokens[FCM_DEVICE_CAPACITY];
+  uint8_t invalidCount = 0;
+  for (uint8_t i = 0; i < count; i++) {
+    notifyPushLog(String("enviando para dispositivo ") + (i + 1) + "/" + count);
+    bool tokenInvalid = false;
+    const String targetToken = fcmTargetTokens[i];
+    bool sent = deliverPushToToken(title, body, targetToken, tokenInvalid);
+    if (!sent && !tokenInvalid) allActiveDevicesDelivered = false;
+    if (tokenInvalid) invalidTokens[invalidCount++] = targetToken;
+  }
+  for (uint8_t i = 0; i < invalidCount; i++) {
+    if (removeFcmToken(invalidTokens[i])) {
+      notifyPushLog(String("token FCM expirado removido; restantes=") + fcmTargetCount);
+    } else {
+      notifyPushLog("falha ao remover token FCM expirado do NVS");
+    }
+  }
+  clearFirebaseCredentialsIfNoDevices();
+  return hasFcmDevices() && allActiveDevicesDelivered;
+}
+
+void processFcmMaintenance() {
+  if (!hasFcmDevices()) {
+    nextFcmValidationAt = 0;
+    return;
+  }
+  if (!pendingPushEvent.isEmpty()) return;
+  if ((int32_t)(millis() - nextFcmValidationAt) < 0) return;
+
+  connectWiFiIfNeeded();
+  if (WiFi.status() != WL_CONNECTED || !clockIsValid()) {
+    nextFcmValidationAt = millis() + PUSH_WIFI_WAIT_MS;
+    return;
+  }
+
+  notifyPushLog("validacao periodica dos destinos FCM iniciada");
+  uint8_t count = fcmTargetCount;
+  String invalidTokens[FCM_DEVICE_CAPACITY];
+  uint8_t invalidCount = 0;
+  bool retryNeeded = false;
+  for (uint8_t i = 0; i < count; i++) {
+    bool tokenInvalid = false;
+    const String targetToken = fcmTargetTokens[i];
+    bool valid = deliverPushToToken("BettaFeeder", "Validacao de destino.",
+                                    targetToken, tokenInvalid, true);
+    if (tokenInvalid) invalidTokens[invalidCount++] = targetToken;
+    else if (!valid) retryNeeded = true;
+  }
+  for (uint8_t i = 0; i < invalidCount; i++) {
+    if (removeFcmToken(invalidTokens[i])) {
+      notifyPushLog(String("destino FCM sem registro removido; restantes=") + fcmTargetCount);
+    } else {
+      notifyPushLog("falha ao remover destino FCM sem registro do NVS");
+      retryNeeded = true;
+    }
+  }
+  clearFirebaseCredentialsIfNoDevices();
+  nextFcmValidationAt = millis() +
+    (retryNeeded ? FCM_VALIDATION_RETRY_MS : FCM_VALIDATION_INTERVAL_MS);
+}
 // Fila em RAM para reenvio periodico; reiniciar pode perder eventos pendentes.
-void connectWiFiIfNeeded();
 
 void queuePush(const String& event, const String& text) {
   if (!pushDeliveryConfigured()) return;
@@ -775,6 +959,7 @@ void processPush() {
     }
     notifyPushLog("push entregue com sucesso");
     promoteNextPush();
+    nextFcmValidationAt = millis() + FCM_VALIDATION_INTERVAL_MS;
   } else {
     pushNextAttempt = millis() + PUSH_RETRY_MS;
     notifyPushLog(String("push falhou; nova tentativa em ") + (PUSH_RETRY_MS / 1000) + "s");
@@ -794,15 +979,26 @@ void processEmptyLoadReminder() {
 }
 
 bool feedOnePortion(const char* source) {
-  if (feedInProgress || motionInProgress) { saveDeviceLog(String("Alimentacao bloqueada (") + source + "): motor ocupado."); notifyBLE("BLOQUEADO: motor ocupado."); return false; }
-  if (!referenceValid) { saveDeviceLog(String("Alimentacao bloqueada (") + source + "): referencia desconhecida."); notifyBLE("BLOQUEADO: referencia desconhecida. Confira a posicao fisica e envie SET_HOME."); return false; }
+  uint8_t nextPortion = portionsDispensed < PORTIONS_PER_LOAD ? portionsDispensed + 1 : 0;
+  if (feedInProgress || motionInProgress) {
+    appendFeedHistory(false, "motor_busy", nextPortion);
+    saveDeviceLog(String("Alimentacao bloqueada (") + source + "): motor ocupado.");
+    notifyBLE("BLOQUEADO: motor ocupado."); return false;
+  }
+  if (!referenceValid) {
+    appendFeedHistory(false, "position_unknown", nextPortion);
+    saveDeviceLog(String("Alimentacao bloqueada (") + source + "): referencia desconhecida.");
+    notifyBLE("BLOQUEADO: referencia desconhecida. Confira a posicao fisica e envie SET_HOME."); return false;
+  }
   if (awaitingReload || portionsDispensed >= PORTIONS_PER_LOAD) {
+    appendFeedHistory(false, "batch_empty", 0);
     saveDeviceLog(String("Alimentacao bloqueada (") + source + "): lote aguardando recarga.");
     notifyBLE("LOTE_VAZIO: alimentador parado. Reabasteca e confirme a recarga no PWA.");
     return false;
   }
   const bool firstFeedAfterReload = portionsDispensed == 0 && rotorPosition == PORTIONS_PER_LOAD;
   if (rotorPosition != portionsDispensed && !firstFeedAfterReload) {
+    appendFeedHistory(false, "position_mismatch", nextPortion);
     referenceValid = false;
     saveSettings();
     notifyBLE("FALHA: indice inconsistente. Confira fisicamente e envie SET_HOME."); return false;
@@ -816,6 +1012,9 @@ bool feedOnePortion(const char* source) {
   portionsDispensed++;
   time_t feedTime = time(nullptr);
   lastFeedEpoch = feedTime >= 1735689600 ? static_cast<uint32_t>(feedTime) : 0;
+  batchFeedEpochs[portionsDispensed - 1] = lastFeedEpoch;
+  prefs.putUInt(batchFeedKey(portionsDispensed - 1).c_str(), lastFeedEpoch);
+  appendFeedHistory(true, "success", portionsDispensed, lastFeedEpoch);
   saveSettings();
   notifyBLE(String("ALIMENTACAO: ") + source + "; porcoes_no_lote=" + String(portionsDispensed) + "/14");
   saveDeviceLog(String("Porcao aplicada (") + source + "); lote=" + String(portionsDispensed) + "/14.");
@@ -870,6 +1069,7 @@ void processSchedule() {
   struct tm nowTm;
   if (!clockIsValid(&nowTm)) {
     if (!clockAvailabilityLogged) {
+      appendFeedHistory(false, "time_unavailable", portionsDispensed < PORTIONS_PER_LOAD ? portionsDispensed + 1 : 0, 0);
       saveDeviceLog("Agendamento suspenso: aguardando sincronizacao do horario NTP.");
       clockAvailabilityLogged = true;
     }
@@ -896,6 +1096,9 @@ void processSchedule() {
       if (lastFeedDate[slot] != today && currentMinute >= feedMinute[slot]) {
         String signature = String(slot) + ":" + reason + ":" + String(today);
         if (signature != lastScheduleBlockLog) {
+          const char* reasonCode = !referenceValid ? "position_unknown" :
+            (awaitingReload ? "batch_empty" : "movement_interrupted");
+          appendFeedHistory(false, reasonCode, portionsDispensed < PORTIONS_PER_LOAD ? portionsDispensed + 1 : 0);
           saveDeviceLog(String("Horario ") + (slot + 1) + " devido, mas bloqueado: " + reason + ".");
           lastScheduleBlockLog = signature;
         }
@@ -941,6 +1144,7 @@ void processSchedule() {
         saveSettings();
       }
     } else {
+      appendFeedHistory(false, "schedule_too_late", portionsDispensed < PORTIONS_PER_LOAD ? portionsDispensed + 1 : 0);
       String missedMessage = String("Horario ") + (slot == 0 ? "1" : "2") +
         " perdido: atraso maior que 30 minutos; alimentacao ignorada.";
       notifyBLE(String("HORARIO_PERDIDO: ") + missedMessage);
@@ -975,7 +1179,7 @@ void sendStatus() {
   s += ";referencia=" + String(referenceValid ? "confirmada" : "verificar");
   s += ";movimento_interrompido=" + String(motionInProgress ? "sim" : "nao");
   s += ";passos_volta=" + String(halfStepsPerRev);
-  s += ";push=" + String(fcmTargetToken.isEmpty() ? "sem_destino" : "configurado");
+  s += ";push=" + String(hasFcmDevices() ? "configurado" : "sem_destino");
   s += ";firebase=" + String(firebaseConfigured() ? "configurado" : "incompleto");
   s += ";fb_project=" + firebaseProjectId;
   s += ";fb_email=" + firebaseClientEmail;
@@ -1097,6 +1301,8 @@ void handleCommand(String cmd) {
     sendStatus();
   } else if (key == "LOGS") {
     emitDeviceLogs();
+  } else if (key == "FEED_HISTORY") {
+    emitBatchFeedHistory();
   } else if (key == "TEMP") {
     sendStatus();
   } else if (key == "FEED") {
@@ -1106,6 +1312,7 @@ void handleCommand(String cmd) {
     // this command as a shortcut to bypass a physical jam.
     rotorPosition = 0;
     portionsDispensed = 0;
+    clearBatchFeedHistory();
     awaitingReload = true; // require explicit confirmation after loading
     referenceValid = true;
     motionInProgress = false;
@@ -1124,6 +1331,7 @@ void handleCommand(String cmd) {
     // Refill confirmation only updates the load state. Motor movement is
     // reserved for scheduled feeding times.
     portionsDispensed = 0;
+    clearBatchFeedHistory();
     awaitingReload = false;
     lastEmptyReminderEpoch = 0;
     prefs.putUInt("emptyReminder", 0);
@@ -1271,14 +1479,16 @@ void handleCommand(String cmd) {
     referenceValid = false; // require physical alignment after recalibration
     saveSettings();
     notifyBLE("OK: calibracao salva. Confira posicao e envie SET_HOME.");
-  } else if (key == "FCM_BEGIN") {
+  } else if (key == "FCM_BEGIN" || key == "FCM_REMOVE_BEGIN") {
     int n = value.toInt();
     if (n < 50 || n > 512) { notifyBLE("ERRO: comprimento FCM invalido"); return; }
     pendingFcmToken = ""; pendingFcmToken.reserve(n + 1);
     expectedFcmLength = n;
-    notifyPushLog(String("recebendo novo token; tamanho=") + n);
-    notifyBLE("OK: FCM_BEGIN");
-  } else if (key == "FCM_ADD") {
+    pendingFcmRemoval = key == "FCM_REMOVE_BEGIN";
+    notifyPushLog(String(pendingFcmRemoval ? "recebendo remocao de dispositivo; tamanho=" : "recebendo registro de dispositivo; tamanho=") + n);
+    notifyBLE(pendingFcmRemoval ? "OK: FCM_REMOVE_BEGIN" : "OK: FCM_BEGIN");
+  } else if (key == "FCM_ADD" || key == "FCM_REMOVE_ADD") {
+    if ((key == "FCM_REMOVE_ADD") != pendingFcmRemoval) { notifyBLE("ERRO: operacao FCM invalida"); return; }
     if (expectedFcmLength == 0 || value.isEmpty() ||
         pendingFcmToken.length() + value.length() > expectedFcmLength) {
       notifyPushLog(String("fragmento invalido: recebido=") + pendingFcmToken.length() +
@@ -1288,24 +1498,36 @@ void handleCommand(String cmd) {
     pendingFcmToken += value;
     // Nao envie log por fragmento: isso congestiona o mesmo canal BLE usado
     // pelo PWA para transmitir o proximo FCM_ADD.
-  } else if (key == "FCM_SAVE") {
+  } else if (key == "FCM_SAVE" || key == "FCM_REMOVE") {
+    if ((key == "FCM_REMOVE") != pendingFcmRemoval) { notifyBLE("ERRO: operacao FCM invalida"); return; }
     if (expectedFcmLength == 0 || pendingFcmToken.length() != expectedFcmLength) {
       notifyPushLog(String("FCM incompleto: recebido=") + pendingFcmToken.length() +
                     ", esperado=" + expectedFcmLength);
       notifyBLE("ERRO: FCM incompleto"); return;
     }
-    if (!replaceFcmToken(pendingFcmToken)) {
-      notifyBLE("ERRO: nao foi possivel salvar o destino FCM");
+    if (pendingFcmRemoval) {
+      bool wasPresent = false;
+      for (uint8_t i = 0; i < fcmTargetCount; i++) if (fcmTargetTokens[i] == pendingFcmToken) wasPresent = true;
+      if (!removeFcmToken(pendingFcmToken)) {
+        notifyBLE("ERRO: falha ao remover dispositivo FCM");
+        pendingFcmToken = ""; expectedFcmLength = 0; pendingFcmRemoval = false;
+        return;
+      }
+      notifyPushLog(String(wasPresent ? "dispositivo FCM removido; restantes=" : "dispositivo FCM ja ausente; restantes=") + fcmTargetCount);
+      clearFirebaseCredentialsIfNoDevices();
+      pendingFcmToken = ""; expectedFcmLength = 0; pendingFcmRemoval = false;
+      notifyBLE("OK: dispositivo FCM removido");
+      return;
+    }
+    if (!upsertFcmToken(pendingFcmToken)) {
+      notifyPushLog("registro FCM falhou: limite de dispositivos ou erro NVS");
+      notifyBLE("ERRO: limite de dispositivos FCM ou falha NVS");
       pendingFcmToken = ""; expectedFcmLength = 0;
       return;
     }
-    pendingFcmToken = ""; expectedFcmLength = 0;
-    notifyPushLog("novo token FCM substituido e salvo no NVS");
+    pendingFcmToken = ""; expectedFcmLength = 0; pendingFcmRemoval = false;
+    notifyPushLog(String("dispositivo FCM salvo; total=") + fcmTargetCount);
     notifyBLE("OK: destino FCM salvo");
-  } else if (key == "FCM_CLEAR") {
-    fcmTargetToken = ""; prefs.remove("fcmToken");
-    pendingFcmToken = ""; expectedFcmLength = 0;
-    notifyBLE("OK: destino FCM removido");
   } else if (key == "FCM_TEST") {
     notifyPushLog("comando FCM_TEST recebido");
     if (!pushDeliveryConfigured()) {
@@ -1429,6 +1651,7 @@ void setup() {
   deviceLogNext = prefs.getUChar("logNext", 0) % DEVICE_LOG_CAPACITY;
   deviceLogCount = prefs.getUChar("logCount", 0);
   if (deviceLogCount > DEVICE_LOG_CAPACITY) deviceLogCount = DEVICE_LOG_CAPACITY;
+  clearFirebaseCredentialsIfNoDevices();
   saveDeviceLog("Reinicializacao do ESP32.");
 
   WiFi.mode(WIFI_STA);
@@ -1440,6 +1663,9 @@ void setup() {
     ? "BettaFeeder V6: posicao salva restaurada sem mover o motor."
     : "BettaFeeder V6: alinhe a cavidade vazia e use SET_HOME; o motor permanece parado.");
   if (motionInProgress) {
+    appendFeedHistory(false, "movement_interrupted", portionsDispensed < PORTIONS_PER_LOAD ? portionsDispensed + 1 : 0);
+    motionInProgress = false;
+    saveSettings();
     const String motionAlert = "Energia interrompida durante movimento do motor. Verifique o rotor e defina novamente a posicao inicial.";
     notifyBLE(String("ALERTA: ") + motionAlert);
     queuePush("MOVIMENTO_INTERROMPIDO", motionAlert);
@@ -1472,6 +1698,7 @@ void loop() {
   processTemperature();
   processEmptyLoadReminder();
   processPush();
+  processFcmMaintenance();
 
   if (millis() - lastStatusCheck >= 1000) {
     lastStatusCheck = millis();
