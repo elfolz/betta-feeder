@@ -430,12 +430,6 @@ button.button-primary:disabled.is-loading .connect-spinner {
 	border-left: 3px solid var(--mint)
 }
 
-.feeding-history-list .feed-test-mode::before {
-	content: 'MODO TESTE · ';
-	color: #ffc96b;
-	font-weight: 700
-}
-
 .feeding-history-list .feed-failure {
 	border-left: 3px solid #ff9299
 }

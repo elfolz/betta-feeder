@@ -84,14 +84,14 @@ function updateMotorTestControls() {
 	$('reloadButton').disabled = motorTestActive || !(isConnected() && feedReferenceReady && reloadWaitingForRefill)
 	$('motorTestBanner').hidden = !motorTestActive
 	if (motorTestActive) {
-		$('motorTestBanner').textContent = `MODO TESTE ATIVO · Proximo disparo ${motorTestNextEpoch ? new Date(motorTestNextEpoch * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }) : 'em calculo'} · ${motorTestShots}/9 executados. Cada disparo percorre o fluxo de producao e conta como porcao. Horarios e comandos manuais estao bloqueados.`
+		$('motorTestBanner').textContent = `MODO TESTE ATIVO · Proximo disparo ${motorTestNextEpoch ? new Date(motorTestNextEpoch * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }) : 'em calculo'} · ${motorTestShots}/9 nesta ativacao. O historico desde a recarga tambem pode incluir alimentacoes anteriores a esta ativacao. Cada disparo de teste conta como porcao.`
 	}
 	const nextTime = motorTestNextEpoch
 		? new Date(motorTestNextEpoch * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })
 		: ''
 	if (!isConnected()) $('motorTestStatus').textContent = 'Conecte ao BettaFeeder para controlar o modo teste.'
 	else if (!motorTestSupported) $('motorTestStatus').textContent = 'O firmware conectado nao oferece modo teste.'
-	else if (motorTestActive) $('motorTestStatus').textContent = `Ativo · disparo ${Math.min(motorTestShots + 1, 9)}/9${nextTime ? ` · proximo: ${nextTime}` : ''}`
+	else if (motorTestActive) $('motorTestStatus').textContent = `Ativo · disparo ${Math.min(motorTestShots + 1, 9)}/9 nesta ativacao${nextTime ? ` · proximo: ${nextTime}` : ''}`
 	else if (motorTestShots >= 9) $('motorTestStatus').textContent = 'Concluido. Antes de abastecer racao real, alinhe o rotor e use SET_HOME para zerar a contagem.'
 	else if (motorTestShots > 0) $('motorTestStatus').textContent = 'Cancelado; disparos contam como porcoes. Antes de abastecer, alinhe o rotor e use SET_HOME.'
 	else $('motorTestStatus').textContent = testPortionsAvailable && feedReferenceReady && !reloadWaitingForRefill ? 'Desligado. O primeiro disparo sera no proximo quarto de hora.' : 'Passo 1: alinhe a cavidade vazia com a saída e clique em “Definir posição inicial”. Passo 2: confirme a recarga no PWA para liberar 9 porções lógicas.'
@@ -337,8 +337,8 @@ function renderFeedHistory() {
 		const portion = record.portion ? `Porção ${record.portion} · ` : ''
 		if (record.success) {
 			item.classList.add('feed-success')
-			if (record.reason === 'test_mode') item.classList.add('feed-test-mode')
-			item.textContent = `${portion}Sequência de passos enviada ao motor · ${when}`
+			const testModePrefix = record.reason === 'test_mode' ? 'MODO TESTE · ' : ''
+			item.textContent = `${testModePrefix}${portion}Sequência de passos enviada ao motor · ${when}`
 		} else {
 			item.classList.add('feed-failure')
 			item.textContent = `${portion}Não realizada: ${reasonLabels[record.reason] || 'motivo não informado'} · ${when}`

@@ -1473,6 +1473,12 @@ void processTemperature() {
   }
 }
 
+bool isPushCommandAllowedDuringTest(const String& key) {
+  return key == "FCM_BEGIN" || key == "FCM_ADD" || key == "FCM_SAVE" ||
+    key == "FCM_CLEAR" || key == "FCM_REMOVE_BEGIN" ||
+    key == "FCM_REMOVE_ADD" || key == "FCM_REMOVE" || key == "FCM_TEST";
+}
+
 void handleCommand(String cmd) {
   cmd.trim();
   if (cmd.isEmpty()) return;
@@ -1523,7 +1529,8 @@ void handleCommand(String cmd) {
     return;
   }
 
-  if (motorTestMode && key != "STATUS" && key != "LOGS" && key != "FEED_HISTORY") {
+  if (motorTestMode && key != "STATUS" && key != "LOGS" && key != "FEED_HISTORY" &&
+      !isPushCommandAllowedDuringTest(key)) {
     notifyBLE("ERRO: desligue o modo de teste antes de outros comandos.");
     return;
   }
