@@ -320,7 +320,8 @@ button:disabled {
 }
 
 .button-primary.is-loading .connect-spinner,
-.button-secondary.is-loading .connect-spinner {
+.button-secondary.is-loading .connect-spinner,
+.button-ghost.is-loading .connect-spinner {
 	display: inline-block
 }
 
@@ -330,6 +331,11 @@ button:disabled {
 }
 
 .button-secondary.is-loading .connect-spinner {
+	border-color: rgba(255, 255, 255, .35);
+	border-top-color: #fff
+}
+
+.button-ghost.is-loading .connect-spinner {
 	border-color: rgba(255, 255, 255, .35);
 	border-top-color: #fff
 }

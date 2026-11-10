@@ -1071,7 +1071,7 @@ async function enablePushNotifications() {
 	}
 	currentFcmToken = token
 	try { localStorage.setItem(pairedFcmTokenKey, token) } catch (_) { }
-	$('pushTest').disabled = !isConnected()
+	updatePushControl()
 	if (!messageListenerRegistered) {
 		messageListenerRegistered = true
 		fbMessaging.onMessage(async payload => {
@@ -1096,8 +1096,8 @@ async function showNativeNotification(title, body) {
 		const registration = await navigator.serviceWorker.ready
 		await registration.showNotification(title, {
 			body,
-			icon: './icons/icon-192.png',
-			badge: './icons/icon-192.png',
+			icon: new URL('./icons/push-icon.png', document.baseURI).href,
+			badge: new URL('./icons/push-icon.png', document.baseURI).href,
 			tag: 'bettafeeder-push',
 			renotify: true
 		})
@@ -1114,7 +1114,7 @@ function updatePushControl() {
 	$('clearFcmDevicesButton').disabled = pushTransitioning || !isConnected()
 	$('pushToggleLabel').textContent = enabled ? 'Ativas neste dispositivo' : 'Desativadas neste dispositivo'
 	$('notificationDetails').hidden = !enabled
-	$('pushTest').disabled = !isConnected() || !enabled
+	$('pushTest').disabled = pushTransitioning || !isConnected() || !enabled || $('pushTest').classList.contains('is-loading')
 }
 
 async function disablePushNotifications() {
@@ -1126,7 +1126,7 @@ async function disablePushNotifications() {
 	if (fbMessaging && currentFcmToken) await fbMessaging.deleteToken()
 	currentFcmToken = ''
 	$('pushState').textContent = 'Notificações desativadas neste dispositivo. A permissão do navegador continua concedida.'
-	$('pushTest').disabled = !isConnected()
+	updatePushControl()
 	updatePushControl()
 }
 
@@ -1156,6 +1156,10 @@ $('clearFcmDevicesButton').addEventListener('click', () => guarded(async () => {
 		'Remover todos os dispositivos FCM',
 		'Isso apagará do ESP32 todos os destinos de notificação salvos, inclusive dispositivos de teste. As credenciais Firebase serão mantidas.'
 	)) return
+	const button = $('clearFcmDevicesButton')
+	button.classList.add('is-loading')
+	button.setAttribute('aria-busy', 'true')
+	button.querySelector('.clear-fcm-button-label').textContent = 'Removendo dispositivos...'
 	pushTransitioning = true
 	updatePushControl()
 	try {
@@ -1169,6 +1173,9 @@ $('clearFcmDevicesButton').addEventListener('click', () => guarded(async () => {
 		$('pushState').textContent = 'Destinos FCM removidos do ESP32. As credenciais Firebase foram mantidas.'
 		log(response, 'success')
 	} finally {
+		button.classList.remove('is-loading')
+		button.setAttribute('aria-busy', 'false')
+		button.querySelector('.clear-fcm-button-label').textContent = 'Remover todos os dispositivos FCM salvos'
 		pushTransitioning = false
 		updatePushControl()
 	}
@@ -1239,7 +1246,7 @@ function pairFcmToken() {
 			BLE_COMMAND_TIMEOUT_MS
 		)
 		if (saveAck.startsWith('ERRO:')) throw new Error(saveAck)
-		$('pushTest').disabled = false
+		updatePushControl()
 		$('pushState').textContent = 'Destino enviado ao ESP32. Use Notificação de teste.'
 		await new Promise(resolve => setTimeout(resolve, 250))
 		await sendCommand('STATUS')
@@ -1312,6 +1319,9 @@ $('pushTest').addEventListener('click', () => guarded(async () => {
 	if (!isConnected() || !hasCommandTransport()) throw new Error('Conecte ao ESP32 por Bluetooth ou USB Serial.')
 	const button = $('pushTest')
 	button.disabled = true
+	button.classList.add('is-loading')
+	button.setAttribute('aria-busy', 'true')
+	button.querySelector('.push-test-button-label').textContent = 'Enviando notificação...'
 	try {
 		// Atualiza o token e garante FCM_BEGIN/FCM_ADD/FCM_SAVE antes do teste.
 		await enablePushNotifications()
@@ -1319,6 +1329,9 @@ $('pushTest').addEventListener('click', () => guarded(async () => {
 		$('pushState').textContent = 'Teste de push solicitado. Aguarde a notificação.'
 		toast('Notificação de teste solicitada')
 	} finally {
-		button.disabled = !isConnected()
+		button.classList.remove('is-loading')
+		button.setAttribute('aria-busy', 'false')
+		button.querySelector('.push-test-button-label').textContent = 'Enviar notificação de teste'
+		updatePushControl()
 	}
 }))

@@ -206,8 +206,8 @@
 			</div>
 			<p class="helper small" id="pushState" aria-live="polite"></p>
 			<div class="status-actions">
-				<button id="pushTest" class="button button-ghost" disabled>Enviar notificação de teste</button>
-				<button id="clearFcmDevicesButton" class="button button-ghost" disabled>Remover todos os dispositivos FCM salvos</button>
+				<button id="pushTest" class="button button-ghost" type="button" aria-busy="false" disabled><span class="connect-spinner" aria-hidden="true"></span><span class="push-test-button-label">Enviar notificação de teste</span></button>
+				<button id="clearFcmDevicesButton" class="button button-ghost" type="button" aria-busy="false" disabled><span class="connect-spinner" aria-hidden="true"></span><span class="clear-fcm-button-label">Remover todos os dispositivos FCM salvos</span></button>
 			</div>
 			<div id="notificationDetails" hidden>
 				<h3 class="notification-heading">Credenciais FCM do ESP32</h3>
@@ -286,7 +286,7 @@
 	<script src="./firebase-config.js" defer></script>
 	<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js" defer></script>
 	<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-compat.js" defer></script>
-	<script src="./app.js?v=67" defer></script>
+	<script src="./app.js?v=69" defer></script>
 </body>
 
 </html>

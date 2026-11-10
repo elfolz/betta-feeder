@@ -77,6 +77,7 @@ static const uint8_t POCKETS = 15;
 static const uint8_t PORTIONS_PER_LOAD = 14;
 static const uint16_t STEP_DELAY_MS = 2;
 static const uint8_t JOG_HALF_STEPS = 32;
+static const uint16_t JOG_STEP_DELAY_MS = STEP_DELAY_MS;
 
 // 8-step half-step sequence, coils IN1..IN4
 static const uint8_t HALF_STEP_SEQ[8][4] = {
@@ -522,7 +523,7 @@ void releaseMotor() {
   }
 }
 
-void doHalfStep(bool forward) {
+void doHalfStep(bool forward, uint16_t stepDelayMs = STEP_DELAY_MS) {
   static int seqIndex = 0;
   if (forward) seqIndex = (seqIndex + 1) % 8;
   else seqIndex = (seqIndex + 7) % 8;
@@ -530,7 +531,7 @@ void doHalfStep(bool forward) {
   for (uint8_t pin = 0; pin < 4; pin++) {
     digitalWrite(MOTOR_PINS[pin], HALF_STEP_SEQ[seqIndex][pin]);
   }
-  delay(STEP_DELAY_MS);
+  delay(stepDelayMs);
 }
 
 // Number of half-steps from home (position 0) to a pocket index.
@@ -563,7 +564,8 @@ void rotateToNextPocket(const char* source, bool settleForFood = true) {
   rotorPosition = newPosition;
   motionInProgress = false;
   saveSettings();
-  saveDeviceLog(String("Sequencia de passos do motor executada (") + source +"); posicao solicitada=" + String(newPosition) + ".");
+  saveDeviceLog(String("Comando do motor enviado (") + source + "); passos=" + String(stepsToMove) +
+    "; posicao logica=" + String(newPosition) + ".");
   if (settleForFood) delay(250); // allow pellets to fall before another feeding movement
 }
 
@@ -577,7 +579,7 @@ bool jogMotor(bool forward) {
   motionInProgress = true;
   referenceValid = false;
   saveSettings();
-  for (uint8_t i = 0; i < JOG_HALF_STEPS; i++) doHalfStep(forward);
+  for (uint8_t i = 0; i < JOG_HALF_STEPS; i++) doHalfStep(forward, JOG_STEP_DELAY_MS);
   releaseMotor();
   motionInProgress = false;
   saveSettings();
@@ -1137,14 +1139,20 @@ bool feedOnePortion(const char* source, bool testMode = false) {
   portionsDispensed++;
   time_t feedTime = time(nullptr);
   lastFeedEpoch = feedTime >= 1735689600 ? static_cast<uint32_t>(feedTime) : 0;
+  String commandClock = "hora indisponivel";
+  if (lastFeedEpoch != 0) {
+    struct tm commandTm;
+    localtime_r(&feedTime, &commandTm);
+    commandClock = twoDigits(commandTm.tm_hour) + ":" + twoDigits(commandTm.tm_min) + ":" + twoDigits(commandTm.tm_sec);
+  }
   batchFeedEpochs[portionsDispensed - 1] = lastFeedEpoch;
   prefs.putUInt(batchFeedKey(portionsDispensed - 1).c_str(), lastFeedEpoch);
   appendFeedHistory(true, testMode ? "test_mode" : "success", portionsDispensed, lastFeedEpoch);
   saveSettings();
-  saveDeviceLog(String("Sequencia de passos do motor executada (") + source + "); lote=" + String(portionsDispensed) + "/14.");
+  saveDeviceLog(String("Comando do motor enviado (") + source + "); lote=" + String(portionsDispensed) + "/14.");
   notifyBLE(String("ALIMENTACAO: ") + source + "; porcoes_no_lote=" + String(portionsDispensed) + "/14");
-  queuePush("FEED_COMMANDED", String(testMode ? "MODO TESTE: " : "") + "Sequencia de passos do motor executada, porcao " + String(portionsDispensed) +
-            "/14. Queda da racao nao confirmada pelo ESP32.");
+  queuePush("FEED_COMMANDED", String(testMode ? "MODO TESTE: " : "") + "Comando de passos para porcao " + String(portionsDispensed) +
+            "/14 enviado as " + commandClock + ". Movimento fisico e queda da racao nao sao confirmados pelo ESP32.");
   if (portionsDispensed == PORTIONS_PER_LOAD) {
     // Stop at pocket 14 until the owner refills and confirms through the PWA.
     awaitingReload = true;
