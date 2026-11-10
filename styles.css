@@ -394,7 +394,11 @@ button.button-primary:disabled.is-loading .connect-spinner {
 	padding: 0;
 	list-style: none;
 	display: grid;
-	gap: 8px
+	gap: 8px;
+	max-height: 180px;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	padding-right: 4px
 }
 
 .feeding-history-list li {
@@ -406,8 +410,30 @@ button.button-primary:disabled.is-loading .connect-spinner {
 	font-size: 13px
 }
 
+.feeding-history-list .feed-history-skeleton {
+	height: 42px;
+	padding: 0;
+	border-color: transparent;
+	background: linear-gradient(100deg, #202329 20%, #343941 45%, #202329 70%);
+	background-size: 220% 100%;
+	animation: firmware-shimmer 1.25s ease-in-out infinite
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.feeding-history-list .feed-history-skeleton {
+		animation: none;
+		background-position: 50% 0
+	}
+}
+
 .feeding-history-list .feed-success {
 	border-left: 3px solid var(--mint)
+}
+
+.feeding-history-list .feed-test-mode::before {
+	content: 'MODO TESTE · ';
+	color: #ffc96b;
+	font-weight: 700
 }
 
 .feeding-history-list .feed-failure {
@@ -416,6 +442,18 @@ button.button-primary:disabled.is-loading .connect-spinner {
 
 .feeding-history-note {
 	margin-top: 12px
+}
+
+.motor-test-banner {
+	margin: 12px 0 0;
+	padding: 10px 12px;
+	border: 1px solid rgba(255, 190, 92, .4);
+	border-radius: 10px;
+	background: rgba(255, 190, 92, .1);
+	color: #ffd28e;
+	font-size: 12px;
+	font-weight: 700;
+	line-height: 1.45
 }
 
 .time-grid {
@@ -826,6 +864,12 @@ textarea::placeholder {
 .log-entry .time {
 	color: var(--mint);
 	margin-right: 8px
+}
+
+.log-entry.motor-test-log-entry {
+	border-left: 3px solid #ffbe5c;
+	padding-left: 8px;
+	color: #ffd28e
 }
 
 .notice {

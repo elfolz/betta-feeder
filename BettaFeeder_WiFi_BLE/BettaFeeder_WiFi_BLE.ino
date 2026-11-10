@@ -132,6 +132,11 @@ bool referenceValid = false; // restored after a clean reboot; cleared if motion
 bool motionInProgress = false; // persisted before motor starts
 bool feedInProgress = false;
 bool startupScheduleChecked = false;
+bool suppressOverdueAfterReload = false;
+bool motorTestMode = false;
+uint8_t motorTestShots = 0;
+uint32_t motorTestNextEpoch = 0;
+static const uint32_t MOTOR_TEST_INTERVALS_SECONDS[3] = {900UL, 1800UL, 3600UL};
 String lastScheduleBlockLog;
 bool clockAvailabilityLogged = false;
 OneWire oneWire(DS18B20_PIN);
@@ -204,6 +209,18 @@ String deviceLogKey(uint8_t index) { return String("log") + (index < 10 ? "0" : 
 String batchFeedKey(uint8_t index) { return String("feedTs") + index; }
 String feedHistoryKey(uint8_t index) { return String("feedEvt") + (index < 10 ? "0" : "") + String(index); }
 
+bool isValidFeedHistoryRecord(const FeedHistoryRecord& record) {
+  if (record.success > 1 || record.portion > PORTIONS_PER_LOAD || record.reason[0] == '\0') return false;
+  const char* knownReasons[] = {
+    "success", "test_mode", "motor_busy", "position_unknown", "batch_empty",
+    "position_mismatch", "movement_interrupted", "schedule_too_late", "time_unavailable"
+  };
+  for (const char* known : knownReasons) {
+    if (strncmp(record.reason, known, sizeof(record.reason)) == 0) return true;
+  }
+  return false;
+}
+
 void appendFeedHistory(bool success, const char* reason, uint8_t portion = 0, uint32_t epoch = 0xFFFFFFFFUL) {
   if (epoch == 0xFFFFFFFFUL) {
     time_t now = time(nullptr);
@@ -238,11 +255,17 @@ void clearBatchFeedHistory() {
 }
 
 void emitBatchFeedHistory() {
-  notifyBLE(String("FEEDS_BEGIN:") + feedHistoryCount);
+  uint8_t validCount = 0;
   uint8_t first = (feedHistoryNext + FEED_HISTORY_CAPACITY - feedHistoryCount) % FEED_HISTORY_CAPACITY;
   for (uint8_t i = 0; i < feedHistoryCount; i++) {
     uint8_t slot = (first + i) % FEED_HISTORY_CAPACITY;
+    if (isValidFeedHistoryRecord(feedHistory[slot])) validCount++;
+  }
+  notifyBLE(String("FEEDS_BEGIN:") + validCount);
+  for (uint8_t i = 0; i < feedHistoryCount; i++) {
+    uint8_t slot = (first + i) % FEED_HISTORY_CAPACITY;
     const FeedHistoryRecord& record = feedHistory[slot];
+    if (!isValidFeedHistoryRecord(record)) continue;
     notifyBLE(String("FEED_EVENT:") + record.epoch + ":" + (record.success ? "OK" : "FAIL") +
       ":" + record.portion + ":" + record.reason);
     delay(25);
@@ -350,6 +373,8 @@ void saveSettings() {
   prefs.putInt("last1", lastFeedDate[0]);
   prefs.putInt("last2", lastFeedDate[1]);
   prefs.putUInt("lastFeed", lastFeedEpoch);
+  prefs.putBool("reloadGuard", suppressOverdueAfterReload);
+  prefs.putBool("motorTest", motorTestMode);
   prefs.putUChar("position", rotorPosition);
   prefs.putUChar("portions", portionsDispensed);
   prefs.putBool("reload", awaitingReload);
@@ -451,6 +476,8 @@ void loadSettings() {
   lastFeedDate[0] = prefs.getInt("last1", 0);
   lastFeedDate[1] = prefs.getInt("last2", 0);
   lastFeedEpoch = prefs.getUInt("lastFeed", 0);
+  suppressOverdueAfterReload = prefs.getBool("reloadGuard", false);
+  motorTestMode = prefs.getBool("motorTest", false);
   if (prefs.getUChar("feedVer", 0) < 1) {
     // Older firmware marked scheduled slots before attempting motor movement,
     // so those dates cannot prove that a portion was actually dispensed.
@@ -512,7 +539,7 @@ uint16_t stepsAtPosition(uint8_t position) {
   return (uint16_t)lround((double)position * halfStepsPerRev / POCKETS);
 }
 
-void rotateToNextPocket() {
+void rotateToNextPocket(const char* source, bool settleForFood = true) {
   motionInProgress = true;
   saveSettings(); // power failure during rotation will be flagged
   uint8_t oldPosition = rotorPosition;
@@ -536,7 +563,8 @@ void rotateToNextPocket() {
   rotorPosition = newPosition;
   motionInProgress = false;
   saveSettings();
-  delay(250); // allow pellets to fall before another movement
+  saveDeviceLog(String("Sequencia de passos do motor executada (") + source +"); posicao solicitada=" + String(newPosition) + ".");
+  if (settleForFood) delay(250); // allow pellets to fall before another feeding movement
 }
 
 bool jogMotor(bool forward) {
@@ -553,6 +581,7 @@ bool jogMotor(bool forward) {
   releaseMotor();
   motionInProgress = false;
   saveSettings();
+  saveDeviceLog(String("JOG ") + (forward ? "direita" : "esquerda") + ": sequencia de passos do motor executada; referencia invalidada.");
   return true;
 }
 
@@ -1074,7 +1103,7 @@ void processEmptyLoadReminder() {
   queuePush("EMPTY_REMINDER", "O alimentador está sem porções. Reabasteça e confirme a recarga no App.");
 }
 
-bool feedOnePortion(const char* source) {
+bool feedOnePortion(const char* source, bool testMode = false) {
   uint8_t nextPortion = portionsDispensed < PORTIONS_PER_LOAD ? portionsDispensed + 1 : 0;
   if (feedInProgress || motionInProgress) {
     appendFeedHistory(false, "motor_busy", nextPortion);
@@ -1103,28 +1132,98 @@ bool feedOnePortion(const char* source) {
   // After refill at pocket 14, this scheduled feeding advances over the
   // empty safety pocket 0 and then dispenses pocket 1. No movement occurs at
   // refill confirmation or during boot.
-  if (firstFeedAfterReload) rotateToNextPocket();
-  rotateToNextPocket();
+  if (firstFeedAfterReload) rotateToNextPocket(source);
+  rotateToNextPocket(source);
   portionsDispensed++;
   time_t feedTime = time(nullptr);
   lastFeedEpoch = feedTime >= 1735689600 ? static_cast<uint32_t>(feedTime) : 0;
   batchFeedEpochs[portionsDispensed - 1] = lastFeedEpoch;
   prefs.putUInt(batchFeedKey(portionsDispensed - 1).c_str(), lastFeedEpoch);
-  appendFeedHistory(true, "success", portionsDispensed, lastFeedEpoch);
+  appendFeedHistory(true, testMode ? "test_mode" : "success", portionsDispensed, lastFeedEpoch);
   saveSettings();
+  saveDeviceLog(String("Sequencia de passos do motor executada (") + source + "); lote=" + String(portionsDispensed) + "/14.");
   notifyBLE(String("ALIMENTACAO: ") + source + "; porcoes_no_lote=" + String(portionsDispensed) + "/14");
-  saveDeviceLog(String("Porcao aplicada (") + source + "); lote=" + String(portionsDispensed) + "/14.");
-  queuePush("FEED_COMMANDED", "Ração fornecida, porção " + String(portionsDispensed) +
-            "/14.");
+  queuePush("FEED_COMMANDED", String(testMode ? "MODO TESTE: " : "") + "Sequencia de passos do motor executada, porcao " + String(portionsDispensed) +
+            "/14. Queda da racao nao confirmada pelo ESP32.");
   if (portionsDispensed == PORTIONS_PER_LOAD) {
     // Stop at pocket 14 until the owner refills and confirms through the PWA.
     awaitingReload = true;
     saveSettings();
-    notifyBLE("LOTE_FINALIZADO: A última porção foi aplicada. Reabasteça o alimentador!");
-    queuePush("EMPTY", "A última porção foi aplicada. Reabasteça o alimentador!");
+    notifyBLE("LOTE_FINALIZADO: sequencia do motor da porcao 14 executada. Verifique e reabasteca o alimentador.");
+    queuePush("EMPTY", "Sequencia do motor da porcao 14 executada. Verifique e reabasteca o alimentador.");
   }
   feedInProgress = false;
   return true;
+}
+
+void processMotorTestSchedule() {
+  if (!motorTestMode) return;
+  if (!referenceValid) {
+    motorTestMode = false;
+    motorTestNextEpoch = 0;
+    saveSettings();
+    saveDeviceLog("Teste do motor cancelado: referencia do rotor invalida.");
+    notifyBLE(String("MOTOR_TEST_STATE:OFF:") + motorTestShots);
+    return;
+  }
+  if (motorTestShots >= 9 || feedInProgress || motionInProgress) return;
+
+  time_t currentTime = time(nullptr);
+  if (currentTime < 1735689600) return;
+  uint32_t nowEpoch = static_cast<uint32_t>(currentTime);
+  if (motorTestNextEpoch == 0) {
+    // Quarter-hour boundaries are also local quarter hours in BRT (UTC-3).
+    motorTestNextEpoch = (nowEpoch / 900UL + 1UL) * 900UL;
+    notifyBLE(String("MOTOR_TEST_NEXT:") + motorTestNextEpoch);
+  }
+  if (nowEpoch < motorTestNextEpoch) return;
+
+  const uint32_t scheduledEpoch = motorTestNextEpoch;
+  if (!feedOnePortion("TEST_MODE", true)) {
+    motorTestMode = false;
+    motorTestNextEpoch = 0;
+    saveSettings();
+    saveDeviceLog("Teste do motor interrompido: fluxo de alimentacao recusou o disparo.");
+    notifyBLE(String("MOTOR_TEST_STATE:OFF:") + motorTestShots);
+    return;
+  }
+  motorTestShots++;
+  uint32_t actualEpoch = static_cast<uint32_t>(time(nullptr));
+  if (motorTestShots < 9) {
+    const uint8_t nextStage = motorTestShots / 3;
+    const uint32_t nextInterval = MOTOR_TEST_INTERVALS_SECONDS[nextStage];
+    motorTestNextEpoch = scheduledEpoch + nextInterval;
+    if (actualEpoch >= motorTestNextEpoch) {
+      // Do not fire missed test slots back-to-back if other work delayed the loop.
+      motorTestNextEpoch = (actualEpoch / nextInterval + 1UL) * nextInterval;
+    }
+  } else motorTestNextEpoch = 0;
+  saveSettings();
+  time_t scheduledTime = scheduledEpoch;
+  struct tm scheduledTm;
+  localtime_r(&scheduledTime, &scheduledTm);
+  String shotLog = String("Teste motor disparo ") + motorTestShots + "/9; previsto " +
+    twoDigits(scheduledTm.tm_hour) + ":" + twoDigits(scheduledTm.tm_min);
+  if (motorTestShots < 9) {
+    time_t nextTime = motorTestNextEpoch;
+    struct tm nextTm;
+    localtime_r(&nextTime, &nextTm);
+    shotLog += String("; proximo ") + twoDigits(nextTm.tm_hour) + ":" + twoDigits(nextTm.tm_min);
+  } else {
+    shotLog += "; ultimo disparo";
+  }
+  saveDeviceLog(shotLog);
+  notifyBLE(String("MOTOR_TEST_SHOT:") + motorTestShots + "/9:" + motorTestNextEpoch);
+
+  if (motorTestShots >= 9) {
+    motorTestMode = false;
+    motorTestNextEpoch = 0;
+    saveSettings();
+    saveDeviceLog("Teste do motor concluido. Os disparos foram contabilizados como porcoes pelo fluxo de producao.");
+    notifyBLE(String("MOTOR_TEST_STATE:OFF:") + motorTestShots);
+  } else {
+    notifyBLE(String("MOTOR_TEST_NEXT:") + motorTestNextEpoch);
+  }
 }
 
 void connectWiFiIfNeeded() {
@@ -1162,6 +1261,11 @@ void connectWiFiIfNeeded() {
 }
 
 void processSchedule() {
+  if (motorTestMode) {
+    processMotorTestSchedule();
+    return;
+  }
+
   struct tm nowTm;
   if (!clockIsValid(&nowTm)) {
     if (!clockAvailabilityLogged) {
@@ -1177,6 +1281,18 @@ void processSchedule() {
 
   int today = dateKey(nowTm);
   int currentMinute = nowTm.tm_hour * 60 + nowTm.tm_min;
+
+  if (suppressOverdueAfterReload) {
+    for (int slot = 0; slot < 2; slot++) {
+      if (currentMinute >= feedMinute[slot] && lastFeedDate[slot] != today) {
+        lastFeedDate[slot] = today;
+        saveDeviceLog(String("Horario ") + (slot + 1) +
+          " ja vencido na confirmacao da recarga; proxima porcao aguardara o proximo horario configurado.");
+      }
+    }
+    suppressOverdueAfterReload = false;
+    saveSettings();
+  }
 
   // A restart does not discard elapsed slots: compare each due slot with the
   // persisted time of the last completed portion before deciding to feed.
@@ -1233,7 +1349,6 @@ void processSchedule() {
 
     int lateBy = currentMinute - feedMinute[slot];
     if (lateBy <= LATE_GRACE_MINUTES) {
-      saveDeviceLog(String("Disparo do horario ") + (slot + 1) + " as " + formatHHMM(feedMinute[slot]));
       if (feedOnePortion(slot == 0 ? "HORARIO_1" : "HORARIO_2")) {
         lastFeedDate[slot] = today;
         saveSettings();
@@ -1272,6 +1387,7 @@ void sendStatus() {
   s += ";porcoes_lote=" + String(portionsDispensed) + "/14";
   s += ";lote=" + String(awaitingReload ? "aguardando_recarga" : "pronto");
   s += ";referencia=" + String(referenceValid ? "confirmada" : "verificar");
+  s += ";motor_test=" + String(motorTestMode ? "ON," : "OFF,") + String(motorTestShots) + "," + String(motorTestNextEpoch);
   s += ";movimento_interrompido=" + String(motionInProgress ? "sim" : "nao");
   s += ";passos_volta=" + String(halfStepsPerRev);
   s += ";push=" + String(hasFcmDevices() ? "configurado" : "sem_destino");
@@ -1368,6 +1484,50 @@ void handleCommand(String cmd) {
   value.trim();
   key.toUpperCase();
 
+  if (key == "TEST_MODE") {
+    if (value.equalsIgnoreCase("ON")) {
+      if (!motorTestMode && (!referenceValid || motionInProgress || feedInProgress || awaitingReload || portionsDispensed > PORTIONS_PER_LOAD - 9)) {
+        notifyBLE("ERRO: defina SET_HOME e confirme uma recarga com pelo menos 9 porcoes disponiveis antes do teste.");
+        return;
+      }
+      if (!motorTestMode) {
+        time_t now = time(nullptr);
+        if (now < 1735689600) {
+          notifyBLE("ERRO: sincronize o relogio NTP antes de iniciar o teste.");
+          return;
+        }
+        motorTestShots = 0;
+        motorTestNextEpoch = (static_cast<uint32_t>(now) / 900UL + 1UL) * 900UL;
+        motorTestMode = true;
+        saveSettings();
+        time_t nextTime = motorTestNextEpoch;
+        struct tm nextTm;
+        localtime_r(&nextTime, &nextTm);
+        saveDeviceLog(String("Modo de teste iniciado; primeiro disparo em ") +
+          twoDigits(nextTm.tm_hour) + ":" + twoDigits(nextTm.tm_min) +
+          "; sequencia 3x15, 3x30 e 3x60 minutos.");
+      }
+      notifyBLE(String("OK: MOTOR_TEST=ON:") + motorTestShots + ":" + motorTestNextEpoch);
+    } else if (value.equalsIgnoreCase("OFF")) {
+      if (motorTestMode) {
+        motorTestMode = false;
+        motorTestNextEpoch = 0;
+        saveSettings();
+        saveDeviceLog(String("Modo de teste do motor cancelado apos ") + motorTestShots +
+          "/9 disparos; porcoes contabilizadas pelo fluxo normal; reposicione o rotor e use SET_HOME antes de abastecer racao real.");
+      }
+      notifyBLE(String("OK: MOTOR_TEST=OFF:") + motorTestShots + ":0");
+    } else {
+      notifyBLE("ERRO: use TEST_MODE=ON ou TEST_MODE=OFF.");
+    }
+    return;
+  }
+
+  if (motorTestMode && key != "STATUS" && key != "LOGS" && key != "FEED_HISTORY") {
+    notifyBLE("ERRO: desligue o modo de teste antes de outros comandos.");
+    return;
+  }
+
   if (key == "BLE_ON") {
     notifyBLE("OK: BLE permanece ativo");
   } else if (key == "SSID" && value.length() > 0) {
@@ -1449,6 +1609,10 @@ void handleCommand(String cmd) {
     portionsDispensed = 0;
     clearBatchFeedHistory();
     awaitingReload = false;
+    suppressOverdueAfterReload = true;
+    // A refill is not a request to catch up on a meal whose time has already
+    // passed. Mark elapsed slots as handled for today so the scheduler waits
+    // for the next configured time instead of dispensing immediately.
     lastEmptyReminderEpoch = 0;
     prefs.putUInt("emptyReminder", 0);
     cancelQueuedPush("EMPTY");
@@ -1700,7 +1864,7 @@ void handleCommand(String cmd) {
     ntpConfigured = false;
     notifyBLE("OK: dados Wi-Fi apagados.");
   } else {
-    notifyBLE("ERRO: comando desconhecido. Use STATUS, FEED, JOG_LEFT, JOG_RIGHT, TIMES, SET_HOME, RELOAD, FCM_*, FB_BEGIN, PRJ_*, EML_*, PK_*, FB_SAVE, BLE_ON.");
+    notifyBLE("ERRO: comando desconhecido. Use STATUS, FEED, JOG_LEFT, JOG_RIGHT, TIMES, TEST_MODE=ON/OFF, SET_HOME, RELOAD, FCM_*, FB_BEGIN, PRJ_*, EML_*, PK_*, FB_SAVE, BLE_ON.");
   }
 }
 
@@ -1842,6 +2006,12 @@ void setup() {
   if (deviceLogCount > DEVICE_LOG_CAPACITY) deviceLogCount = DEVICE_LOG_CAPACITY;
   clearFirebaseCredentialsIfNoDevices();
   saveDeviceLog("Reinicializacao do ESP32.");
+  if (motorTestMode) {
+    motorTestMode = false;
+    motorTestNextEpoch = 0;
+    saveSettings();
+    saveDeviceLog("Teste do motor interrompido por reinicializacao; porcoes ja executadas permanecem contabilizadas.");
+  }
 
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
@@ -1852,6 +2022,7 @@ void setup() {
     ? "BettaFeeder V6: posicao salva restaurada sem mover o motor."
     : "BettaFeeder V6: alinhe a cavidade vazia e use SET_HOME; o motor permanece parado.");
   if (motionInProgress) {
+    referenceValid = false;
     appendFeedHistory(false, "movement_interrupted", portionsDispensed < PORTIONS_PER_LOAD ? portionsDispensed + 1 : 0);
     motionInProgress = false;
     saveSettings();
@@ -1872,8 +2043,10 @@ void setup() {
 }
 
 void loop() {
-  // Feeding has priority over maintenance work. Drain incoming commands and
-  // evaluate scheduled slots before Wi-Fi, temperature, push, or FCM tasks.
+  // Run due scheduled feeding before serial/BLE command handling and all
+  // maintenance tasks. The motor action completes before its result is logged.
+  processSchedule();
+
   processSerialCommands();
 
   char localCommand[192];
@@ -1900,10 +2073,6 @@ void loop() {
   }
 
   if (hasCommand) handleCommand(String(localCommand));
-
-  // Keep scheduled feeding ahead of loop maintenance. Push networking runs in
-  // a lower-priority worker, so it cannot block manual or scheduled commands.
-  processSchedule();
 
   connectWiFiIfNeeded();
   processTemperature();

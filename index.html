@@ -96,23 +96,6 @@
 			<p class="helper small">Após 14 porções, reabasteça e confirme aqui.</p>
 		</section>
 
-		<section class="panel motor-alignment-panel">
-			<div class="card-heading">
-				<div>
-					<div class="section-kicker">AJUSTE MANUAL</div>
-					<h2>Alinhamento do motor</h2>
-				</div>
-			</div>
-			<p class="helper">Use as setas para mover o rotor em passos curtos. Alinhe a cavidade vazia com a saída e defina a posição inicial. Isso reinicia o histórico e a contagem do lote; será necessário reabastecer e confirmar a recarga.</p>
-			<div class="motor-alignment-actions">
-				<div class="motor-jog-controls" role="group" aria-label="Ajuste manual do rotor">
-					<button id="motorLeftButton" class="button button-ghost motor-jog-button" type="button" aria-label="Girar rotor para a esquerda" title="Girar rotor para a esquerda" disabled>←</button>
-					<button id="motorRightButton" class="button button-ghost motor-jog-button" type="button" aria-label="Girar rotor para a direita" title="Girar rotor para a direita" disabled>→</button>
-				</div>
-				<button id="homeButton" class="button button-secondary" disabled>Definir posição inicial</button>
-			</div>
-		</section>
-
 		<section class="panel">
 			<div class="card-heading">
 				<div>
@@ -133,11 +116,40 @@
 				</label>
 			</div>
 			<button id="saveTimesButton" class="button button-secondary full" disabled>Enviar horários ao ESP32</button>
+			<div class="notification-toggle-row motor-test-toggle-row">
+				<div class="notification-toggle-copy">
+					<strong>Modo teste do motor</strong>
+					<small id="motorTestStatus">Conecte ao firmware atualizado para iniciar.</small>
+				</div>
+				<label class="toggle-switch">
+					<input id="motorTestToggle" type="checkbox" role="switch" aria-label="Ativar modo teste do motor" aria-describedby="motorTestHelp" disabled>
+					<span class="toggle-track" aria-hidden="true"></span>
+				</label>
+			</div>
+			<p id="motorTestBanner" class="motor-test-banner" role="status" hidden>MODO TESTE ATIVO: horarios normais e acionamentos manuais estao bloqueados. Cada disparo segue o fluxo de producao e conta como porcao.</p>
+			<p id="motorTestHelp" class="helper small">Antes de ativar:<br>1) alinhe manualmente a cavidade vazia com a saída e clique em <strong>Definir posição inicial</strong> (SET_HOME);<br>2) confirme a recarga no PWA para liberar pelo menos 9 porções lógicas. Não coloque ração: cada disparo de teste conta como porção e usa o mesmo histórico e push da produção. Com o relógio NTP sincronizado, o primeiro disparo será no próximo quarto de hora; depois serão 3 a cada 15 min, 3 a cada 30 min e 3 a cada hora. Após o teste, alinhe novamente a cavidade vazia e use <strong>Definir posição inicial</strong> antes de abastecer ração real.</p>
 			<div id="feedingHistory" class="feeding-history" hidden aria-live="polite">
 				<h3>Últimas alimentações desde a recarga</h3>
 				<p id="feedingHistoryEmpty" class="helper small" hidden>Nenhuma alimentação registrada neste lote.</p>
 				<ol id="feedingHistoryList" class="feeding-history-list"></ol>
-				<p class="helper small feeding-history-note">O firmware registra bloqueios e movimentos interrompidos. Sem sensor de posição, uma trava mecânica durante a rotação pode não ser detectada.</p>
+				<p class="helper small feeding-history-note">O horário registrado é quando o firmware terminou de enviar os passos ao motor. Sem sensor de posição, ele não confirma que o rotor girou fisicamente nem que a ração caiu.</p>
+			</div>
+		</section>
+
+		<section class="panel motor-alignment-panel">
+			<div class="card-heading">
+				<div>
+					<div class="section-kicker">AJUSTE MANUAL</div>
+					<h2>Alinhamento do motor</h2>
+				</div>
+			</div>
+			<p class="helper">Use as setas para mover o rotor em passos curtos. Alinhe a cavidade vazia com a saída e defina a posição inicial. Isso reinicia o histórico e a contagem do lote; será necessário reabastecer e confirmar a recarga.</p>
+			<div class="motor-alignment-actions">
+				<div class="motor-jog-controls" role="group" aria-label="Ajuste manual do rotor">
+					<button id="motorLeftButton" class="button button-ghost motor-jog-button" type="button" aria-label="Girar rotor para a esquerda" title="Girar rotor para a esquerda" disabled>←</button>
+					<button id="motorRightButton" class="button button-ghost motor-jog-button" type="button" aria-label="Girar rotor para a direita" title="Girar rotor para a direita" disabled>→</button>
+				</div>
+				<button id="homeButton" class="button button-secondary" disabled>Definir posição inicial</button>
 			</div>
 		</section>
 
@@ -274,7 +286,7 @@
 	<script src="./firebase-config.js" defer></script>
 	<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js" defer></script>
 	<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-compat.js" defer></script>
-	<script src="./app.js?v=56" defer></script>
+	<script src="./app.js?v=66" defer></script>
 </body>
 
 </html>

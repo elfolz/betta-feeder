@@ -37,8 +37,17 @@ let rxFragments = ''
 let statusRefreshTimer = null
 let feedReferenceReady = false
 let feedTimesReceived = false
+let reloadWaitingForRefill = false
+let motorTestSupported = false
+let motorTestActive = false
+let motorTestShots = 0
+let motorTestNextEpoch = 0
 let receivingFeedHistory = false
 let feedHistoryEpochs = []
+const validFeedHistoryReasons = new Set([
+	'success', 'test_mode', 'motor_busy', 'position_unknown', 'batch_empty',
+	'position_mismatch', 'movement_interrupted', 'schedule_too_late', 'time_unavailable'
+])
 let firebaseSetupAlertShown = false
 const bleResponseWaiters = []
 const displayedFirmwareLogKeys = new Set()
@@ -55,7 +64,37 @@ function hasCommandTransport() {
 function updateFeedButtonAvailability() {
 	const button = $('testFeedButton')
 	const remaining = Number($('portionsStatus').textContent)
-	button.disabled = !isConnected() || !feedReferenceReady || remaining <= 0 || button.classList.contains('is-loading')
+	button.disabled = !isConnected() || motorTestActive || !feedReferenceReady || remaining <= 0 || button.classList.contains('is-loading')
+}
+
+function updateMotorTestControls() {
+	const toggle = $('motorTestToggle')
+	if (!toggle) return
+	toggle.checked = motorTestActive
+	const testPortionsAvailable = Number($('portionsStatus').textContent) >= 9
+	toggle.disabled = !isConnected() || !motorTestSupported || (!motorTestActive && (!feedReferenceReady || reloadWaitingForRefill || !testPortionsAvailable))
+	const scheduleDisabled = !isConnected() || !feedTimesReceived || motorTestActive
+	$('feed1').disabled = scheduleDisabled
+	$('feed2').disabled = scheduleDisabled
+	$('saveTimesButton').disabled = scheduleDisabled
+	updateFeedButtonAvailability()
+	$('homeButton').disabled = !isConnected() || motorTestActive
+	$('motorLeftButton').disabled = !isConnected() || motorTestActive
+	$('motorRightButton').disabled = !isConnected() || motorTestActive
+	$('reloadButton').disabled = motorTestActive || !(isConnected() && feedReferenceReady && reloadWaitingForRefill)
+	$('motorTestBanner').hidden = !motorTestActive
+	if (motorTestActive) {
+		$('motorTestBanner').textContent = `MODO TESTE ATIVO · Proximo disparo ${motorTestNextEpoch ? new Date(motorTestNextEpoch * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }) : 'em calculo'} · ${motorTestShots}/9 executados. Cada disparo percorre o fluxo de producao e conta como porcao. Horarios e comandos manuais estao bloqueados.`
+	}
+	const nextTime = motorTestNextEpoch
+		? new Date(motorTestNextEpoch * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })
+		: ''
+	if (!isConnected()) $('motorTestStatus').textContent = 'Conecte ao BettaFeeder para controlar o modo teste.'
+	else if (!motorTestSupported) $('motorTestStatus').textContent = 'O firmware conectado nao oferece modo teste.'
+	else if (motorTestActive) $('motorTestStatus').textContent = `Ativo · disparo ${Math.min(motorTestShots + 1, 9)}/9${nextTime ? ` · proximo: ${nextTime}` : ''}`
+	else if (motorTestShots >= 9) $('motorTestStatus').textContent = 'Concluido. Antes de abastecer racao real, alinhe o rotor e use SET_HOME para zerar a contagem.'
+	else if (motorTestShots > 0) $('motorTestStatus').textContent = 'Cancelado; disparos contam como porcoes. Antes de abastecer, alinhe o rotor e use SET_HOME.'
+	else $('motorTestStatus').textContent = testPortionsAvailable && feedReferenceReady && !reloadWaitingForRefill ? 'Desligado. O primeiro disparo sera no proximo quarto de hora.' : 'Passo 1: alinhe a cavidade vazia com a saída e clique em “Definir posição inicial”. Passo 2: confirme a recarga no PWA para liberar 9 porções lógicas.'
 }
 
 function log(message, kind = 'info', occurredAt) {
@@ -64,6 +103,7 @@ function log(message, kind = 'info', occurredAt) {
 	if (empty) empty.remove()
 	const row = document.createElement('div')
 	row.className = 'log-entry'
+	if (kind === 'test') row.classList.add('motor-test-log-entry')
 	const eventTimestamp = occurredAt === undefined
 		? Date.now()
 		: occurredAt instanceof Date ? occurredAt.getTime() : null
@@ -180,8 +220,18 @@ async function connectGatt(device, retries = 2) {
 }
 
 function setConnected(connected, name = 'BettaFeeder') {
-	if (!connected) feedTimesReceived = false
+	if (!connected) {
+		feedTimesReceived = false
+		feedReferenceReady = false
+		reloadWaitingForRefill = false
+		motorTestSupported = false
+	}
 	setFirmwareFieldsLoading(connected)
+	if (connected) showFeedHistoryLoading()
+	else if ($('feedingHistoryList').getAttribute('aria-busy') === 'true') {
+		$('feedingHistoryList').removeAttribute('aria-busy')
+		$('feedingHistory').hidden = true
+	}
 	const badge = $('connectionBadge')
 	badge.classList.toggle('online', connected)
 	badge.classList.toggle('offline', !connected)
@@ -190,7 +240,7 @@ function setConnected(connected, name = 'BettaFeeder') {
 	$('deviceDescription').textContent = connected
 		? (connectionMode === 'serial' ? 'Conectado via USB Serial' : 'Conectado via Bluetooth Low Energy')
 		: 'Nenhum dispositivo conectado';
-	$('saveTimesButton').disabled = !connected || !feedTimesReceived
+	$('saveTimesButton').disabled = !connected || !feedTimesReceived || motorTestActive
 	$('saveWifiButton').disabled = !connected
 	$('statusButton').disabled = !connected
 	updateFeedButtonAvailability()
@@ -198,8 +248,8 @@ function setConnected(connected, name = 'BettaFeeder') {
 	$('motorLeftButton').disabled = !connected
 	$('motorRightButton').disabled = !connected
 	$('reloadButton').disabled = true // enabled only after STATUS reports aguardando_recarga
-	$('feed1').disabled = !connected || !feedTimesReceived
-	$('feed2').disabled = !connected || !feedTimesReceived
+	$('feed1').disabled = !connected || !feedTimesReceived || motorTestActive
+	$('feed2').disabled = !connected || !feedTimesReceived || motorTestActive
 	$('ssid').disabled = !connected
 	$('password').disabled = !connected
 	$('togglePassword').disabled = !connected
@@ -214,6 +264,7 @@ function setConnected(connected, name = 'BettaFeeder') {
 	bluetoothButton.querySelector('.connect-button-label').textContent = connected && !serialActive ? 'Desconectar' : 'Conectar via Bluetooth'
 	bluetoothButton.disabled = serialActive || connectionInProgress
 	serialButton.disabled = (connected && Boolean(device?.gatt?.connected)) || serialButton.classList.contains('is-loading')
+	updateMotorTestControls()
 	if (!serialButton.classList.contains('is-loading')) {
 		serialButton.querySelector('.serial-button-label').textContent = connectionMode === 'serial' && connected
 			? 'Desconectar USB Serial'
@@ -246,8 +297,24 @@ function setConnectionLoading(loading, mode = 'bluetooth') {
 	button.classList.toggle('button-danger', !loading && (serial ? serialConnected : Boolean(device?.gatt?.connected)))
 }
 
+function showFeedHistoryLoading() {
+	const panel = $('feedingHistory')
+	const list = $('feedingHistoryList')
+	panel.hidden = false
+	list.setAttribute('aria-busy', 'true')
+	list.replaceChildren()
+	$('feedingHistoryEmpty').hidden = true
+	for (let i = 0; i < 3; i++) {
+		const placeholder = document.createElement('li')
+		placeholder.className = 'feed-history-skeleton'
+		placeholder.setAttribute('aria-hidden', 'true')
+		list.appendChild(placeholder)
+	}
+}
+
 function renderFeedHistory() {
 	const list = $('feedingHistoryList')
+	list.removeAttribute('aria-busy')
 	list.replaceChildren()
 	const reasonLabels = {
 		motor_busy: 'Motor ocupado',
@@ -265,12 +332,13 @@ function renderFeedHistory() {
 	ordered.forEach(record => {
 		const item = document.createElement('li')
 		const when = record.epoch
-			? new Date(record.epoch * 1000).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })
+			? new Date(record.epoch * 1000).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'medium' })
 			: 'Data e hora indisponíveis'
 		const portion = record.portion ? `Porção ${record.portion} · ` : ''
 		if (record.success) {
 			item.classList.add('feed-success')
-			item.textContent = `${portion}Alimentação concluída · ${when}`
+			if (record.reason === 'test_mode') item.classList.add('feed-test-mode')
+			item.textContent = `${portion}Sequência de passos enviada ao motor · ${when}`
 		} else {
 			item.classList.add('feed-failure')
 			item.textContent = `${portion}Não realizada: ${reasonLabels[record.reason] || 'motivo não informado'} · ${when}`
@@ -283,15 +351,53 @@ function renderFeedHistory() {
 async function requestFeedingHistory(showHistory = true) {
 	if (!isConnected() || !hasCommandTransport()) return
 	if (!showHistory && $('feedingHistory').hidden) return
-	$('feedingHistory').hidden = false
-	$('feedingHistoryEmpty').hidden = false
+	showFeedHistoryLoading()
+	$('feedingHistoryEmpty').hidden = true
 	$('feedingHistoryEmpty').textContent = 'Carregando alimentações...'
-	await sendCommandAndWait('FEED_HISTORY', message => message === 'FEEDS_END', 15000)
+	try {
+		await sendCommandAndWait('FEED_HISTORY', message => message === 'FEEDS_END', 15000)
+	} catch (error) {
+		const list = $('feedingHistoryList')
+		list.removeAttribute('aria-busy')
+		list.replaceChildren()
+		$('feedingHistoryEmpty').hidden = false
+		$('feedingHistoryEmpty').textContent = 'Falha ao carregar o hist\u00f3rico. Tente atualizar.'
+		throw error
+	}
 }
 
 function parseDeviceMessage(message) {
 	// Push diagnostics are neither PWA activity events nor device history.
 	if (message.startsWith('PUSH:')) return
+	const motorTestState = message.match(/^MOTOR_TEST_STATE:(ON|OFF):(\d+)$/)
+	if (motorTestState) {
+		motorTestSupported = true
+		motorTestActive = motorTestState[1] === 'ON'
+		motorTestShots = Number(motorTestState[2])
+		if (!motorTestActive) {
+			motorTestNextEpoch = 0
+			sendCommand('STATUS', true).catch(() => {})
+		}
+		updateMotorTestControls()
+		updateFeedButtonAvailability()
+		log(`MODO TESTE ${motorTestActive ? 'ativado' : 'desativado'} (${motorTestShots}/9).`, motorTestActive ? 'test' : 'info')
+		return
+	}
+	const motorTestShot = message.match(/^MOTOR_TEST_SHOT:(\d+)\/9:(\d+)$/)
+	if (motorTestShot) {
+		motorTestSupported = true
+		motorTestShots = Number(motorTestShot[1])
+		motorTestNextEpoch = Number(motorTestShot[2])
+		updateMotorTestControls()
+		log(`MODO TESTE · disparo ${motorTestShots}/9 executado.`, 'test')
+		return
+	}
+	const motorTestNext = message.match(/^MOTOR_TEST_NEXT:(\d+)$/)
+	if (motorTestNext) {
+		motorTestNextEpoch = Number(motorTestNext[1])
+		updateMotorTestControls()
+		return
+	}
 	if (message === 'FEEDS_END') {
 		receivingFeedHistory = false
 		renderFeedHistory()
@@ -302,11 +408,12 @@ function parseDeviceMessage(message) {
 		const [epochText, status, portionText, reason] = message.slice('FEED_EVENT:'.length).split(':')
 		const epoch = Number(epochText)
 		const portion = Number(portionText)
+		if (!Number.isInteger(epoch) || epoch < 0 || !Number.isInteger(portion) || portion < 0 || portion > 14 || !['OK', 'FAIL'].includes(status) || !validFeedHistoryReasons.has(reason)) return
 		feedHistoryEpochs.push({
-			epoch: Number.isFinite(epoch) ? epoch : 0,
+			epoch,
 			success: status === 'OK',
-			portion: Number.isFinite(portion) ? portion : 0,
-			reason: reason || ''
+			portion,
+			reason
 		})
 	}
 	if (message.startsWith('LOG:')) {
@@ -319,7 +426,8 @@ function parseDeviceMessage(message) {
 				displayedFirmwareLogKeys.delete(displayedFirmwareLogKeys.values().next().value)
 			}
 			const epoch = Number(match[1])
-			log(match[2], 'info', epoch ? new Date(epoch * 1000) : null)
+			const kind = /teste do motor|teste motor/i.test(match[2]) ? 'test' : 'info'
+			log(match[2], kind, epoch ? new Date(epoch * 1000) : null)
 		}
 		return
 	}
@@ -348,6 +456,13 @@ function parseDeviceMessage(message) {
 		const i = part.indexOf('=')
 		return i < 0 ? [part, ''] : [part.slice(0, i), part.slice(i + 1)]
 	}))
+	const motorTestMatch = fields.motor_test?.match(/^(ON|OFF),(\d+),(\d+)$/)
+	motorTestSupported = Boolean(motorTestMatch)
+	if (motorTestMatch) {
+		motorTestActive = motorTestMatch[1] === 'ON'
+		motorTestShots = Number(motorTestMatch[2])
+		motorTestNextEpoch = Number(motorTestMatch[3])
+	}
 	const wifiLabels = { conectado: 'Conectado', desconectado: 'Desconectado' }
 	$('wifiStatus').textContent = wifiLabels[fields.wifi] || '—'
 	const dateMatch = fields.data?.match(/^(\d{4})-(\d{2})-(\d{2})$/)
@@ -364,6 +479,7 @@ function parseDeviceMessage(message) {
 	const batchMatch = fields.porcoes_lote?.match(/^(\d+)\/14$/)
 	const dispensed = batchMatch ? Number(batchMatch[1]) : null
 	const waitingForReload = fields.lote === 'aguardando_recarga'
+	reloadWaitingForRefill = waitingForReload
 	$('portionsStatus').textContent = fields.porcoes_restantes ||
 		(dispensed !== null ? String(waitingForReload ? 0 : Math.max(0, 14 - dispensed)) : '—')
 	const temperature = fields.temperatura
@@ -399,10 +515,11 @@ function parseDeviceMessage(message) {
 	$('feed1').value = fields.feed1 || ''
 	$('feed2').value = fields.feed2 || ''
 	feedTimesReceived = Boolean(fields.feed1 && fields.feed2)
-	$('feed1').disabled = !isConnected() || !feedTimesReceived
-	$('feed2').disabled = !isConnected() || !feedTimesReceived
-	$('saveTimesButton').disabled = !isConnected() || !feedTimesReceived
+	$('feed1').disabled = !isConnected() || !feedTimesReceived || motorTestActive
+	$('feed2').disabled = !isConnected() || !feedTimesReceived || motorTestActive
+	$('saveTimesButton').disabled = !isConnected() || !feedTimesReceived || motorTestActive
 	setFirmwareFieldsLoading(false)
+	updateMotorTestControls()
 	alertIfFirebaseSetupIncomplete(fields.firebase)
 }
 
@@ -459,6 +576,7 @@ async function connect() {
 		connectionStage = 'envio do STATUS'
 		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
 		await sendCommandAndWait('LOGS', message => message === 'LOGS_DONE', 15000)
+		await requestFeedingHistory()
 		void syncPushAuthorization()
 	} catch (error) {
 		const shouldDisconnect = Boolean(server?.connected)
@@ -504,6 +622,7 @@ async function attachSerialPort(port, verifyDevice = false) {
 		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
 	}
 	await sendCommandAndWait('LOGS', message => message === 'LOGS_DONE', 15000)
+	await requestFeedingHistory()
 	void syncPushAuthorization()
 }
 
@@ -654,6 +773,34 @@ $('saveTimesButton').addEventListener('click', () => guarded(async () => {
 	)
 	await requestFeedingHistory()
 	toast('Horários enviados ao ESP32')
+}))
+
+$('motorTestToggle').addEventListener('change', () => guarded(async () => {
+	const toggle = $('motorTestToggle')
+	const requestedActive = toggle.checked
+	toggle.disabled = true
+	try {
+		const response = await sendCommandAndWait(
+			`TEST_MODE=${requestedActive ? 'ON' : 'OFF'}`,
+			message => message.startsWith('OK: MOTOR_TEST=') || message.startsWith('ERRO:'),
+			BLE_COMMAND_TIMEOUT_MS
+		)
+		if (response.startsWith('ERRO:')) throw new Error(response)
+		const result = response.match(/^OK: MOTOR_TEST=(ON|OFF):(\d+):(\d+)$/)
+		if (!result) throw new Error('Resposta inesperada do firmware ao alterar o modo teste.')
+		motorTestSupported = true
+		motorTestActive = result[1] === 'ON'
+		motorTestShots = Number(result[2])
+		motorTestNextEpoch = Number(result[3])
+		updateMotorTestControls()
+		updateFeedButtonAvailability()
+		if (!motorTestActive) sendCommand('STATUS', true).catch(error => log(`Falha ao atualizar o estado: ${error?.message || error}`, 'error'))
+		toast(motorTestActive ? 'Modo teste iniciado' : 'Modo teste interrompido')
+	} catch (error) {
+		motorTestActive = !requestedActive
+		updateMotorTestControls()
+		throw error
+	}
 }))
 
 $('wifiForm').addEventListener('submit', event => guarded(async () => {
