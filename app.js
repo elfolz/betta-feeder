@@ -839,7 +839,24 @@ $('clearLogButton').addEventListener('click', () => {
 
 if ('serviceWorker' in navigator && window.isSecureContext) {
 	window.addEventListener('load', () => {
-		navigator.serviceWorker.register('./sw.js').catch(err => {
+		let refreshing = false
+		navigator.serviceWorker.addEventListener('controllerchange', () => {
+			if (refreshing) return
+			refreshing = true
+			window.location.reload()
+		})
+
+		navigator.serviceWorker.register('./sw.js').then(registration => {
+			const checkForUpdates = () => registration.update().catch(err => {
+				console.warn('Falha ao verificar atualizaÃ§Ãµes do PWA:', err)
+			})
+
+			void checkForUpdates()
+			window.setInterval(checkForUpdates, 60 * 60 * 1000)
+			document.addEventListener('visibilitychange', () => {
+				if (document.visibilityState === 'visible') void checkForUpdates()
+			})
+		}).catch(err => {
 			console.warn('Falha ao registrar service worker:', err)
 		})
 	})
