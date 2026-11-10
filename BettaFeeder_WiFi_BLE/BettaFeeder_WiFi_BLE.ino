@@ -392,6 +392,18 @@ bool removeFcmToken(const String& token) {
   return true;
 }
 
+bool clearFcmDevices() {
+  String previousTokens[FCM_DEVICE_CAPACITY];
+  const uint8_t previousCount = fcmTargetCount;
+  for (uint8_t i = 0; i < previousCount; i++) previousTokens[i] = fcmTargetTokens[i];
+  for (uint8_t i = 0; i < FCM_DEVICE_CAPACITY; i++) fcmTargetTokens[i] = "";
+  fcmTargetCount = 0;
+  if (saveFcmDevices()) return true;
+  fcmTargetCount = previousCount;
+  for (uint8_t i = 0; i < previousCount; i++) fcmTargetTokens[i] = previousTokens[i];
+  return false;
+}
+
 bool hasFcmDevices() { return fcmTargetCount > 0; }
 
 void clearQueuedPushes();
@@ -399,12 +411,10 @@ bool hasPendingPush();
 
 void clearFirebaseCredentialsIfNoDevices() {
   if (hasFcmDevices()) return;
-  bool hadCredentials = !firebaseProjectId.isEmpty() || !firebaseClientEmail.isEmpty() || !firebasePrivateKey.isEmpty();
-  clearQueuedPushes();
-  firebaseProjectId = ""; firebaseClientEmail = ""; firebasePrivateKey = "";
-  prefs.remove("fbProject"); prefs.remove("fbEmail"); prefs.remove("fbKey"); prefs.remove("fbKeyBin");
+  // Keep Firebase credentials so a replacement device can be registered without
+  // requiring the user to enter the service account again.
   oauthAccessToken = ""; oauthExpiresAtMs = 0;
-  if (hadCredentials) notifyPushLog("nenhum dispositivo FCM cadastrado; credenciais Firebase apagadas");
+  notifyPushLog("nenhum dispositivo FCM cadastrado; credenciais Firebase mantidas");
 }
 
 void loadSettings() {
@@ -1605,6 +1615,15 @@ void handleCommand(String cmd) {
     referenceValid = false; // require physical alignment after recalibration
     saveSettings();
     notifyBLE("OK: calibracao salva. Confira posicao e envie SET_HOME.");
+  } else if (key == "FCM_CLEAR") {
+    const uint8_t removedCount = fcmTargetCount;
+    if (!clearFcmDevices()) {
+      notifyPushLog("falha ao limpar destinos FCM da NVS");
+      notifyBLE("ERRO: falha ao limpar dispositivos FCM na NVS");
+      return;
+    }
+    notifyPushLog(String("destinos FCM removidos: ") + removedCount + "; credenciais Firebase mantidas");
+    notifyBLE("OK: dispositivos FCM removidos");
   } else if (key == "FCM_BEGIN" || key == "FCM_REMOVE_BEGIN") {
     int n = value.toInt();
     if (n < 50 || n > 512) { notifyBLE("ERRO: comprimento FCM invalido"); return; }
@@ -1647,8 +1666,16 @@ void handleCommand(String cmd) {
       return;
     }
     if (!upsertFcmToken(pendingFcmToken)) {
-      notifyPushLog("registro FCM falhou: limite de dispositivos ou erro NVS");
-      notifyBLE("ERRO: limite de dispositivos FCM ou falha NVS");
+      if (fcmTargetCount >= FCM_DEVICE_CAPACITY) {
+        notifyPushLog(String("registro FCM recusado: limite atingido; dispositivos=") +
+                      fcmTargetCount + "/" + FCM_DEVICE_CAPACITY);
+        notifyBLE(String("ERRO: limite de dispositivos FCM atingido (") +
+                  FCM_DEVICE_CAPACITY + ")");
+      } else {
+        notifyPushLog(String("registro FCM falhou ao gravar na NVS; dispositivos=") +
+                      fcmTargetCount + "/" + FCM_DEVICE_CAPACITY);
+        notifyBLE("ERRO: falha ao gravar dispositivo FCM na NVS");
+      }
       pendingFcmToken = ""; expectedFcmLength = 0;
       return;
     }

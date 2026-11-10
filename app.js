@@ -917,6 +917,11 @@ async function enablePushNotifications() {
 		serviceWorkerRegistration: registration
 	})
 	if (!token) throw new Error('Firebase não forneceu token de registro.')
+	let previousToken = ''
+	try { previousToken = localStorage.getItem(pairedFcmTokenKey) || '' } catch (_) { }
+	if (isConnected() && previousToken && previousToken !== token) {
+		await removePairedFcmDevice(previousToken)
+	}
 	currentFcmToken = token
 	try { localStorage.setItem(pairedFcmTokenKey, token) } catch (_) { }
 	$('pushTest').disabled = !isConnected()
@@ -959,6 +964,7 @@ function updatePushControl() {
 	const enabled = pushTransitioning ? toggle.checked : pushActive
 	if (!pushTransitioning) toggle.checked = pushActive
 	toggle.disabled = pushTransitioning || !isConnected()
+	$('clearFcmDevicesButton').disabled = pushTransitioning || !isConnected()
 	$('pushToggleLabel').textContent = enabled ? 'Ativas neste dispositivo' : 'Desativadas neste dispositivo'
 	$('notificationDetails').hidden = !enabled
 	$('pushTest').disabled = !isConnected() || !enabled
@@ -997,6 +1003,30 @@ $('pushToggle').addEventListener('change', async event => {
 })
 
 updatePushControl()
+
+$('clearFcmDevicesButton').addEventListener('click', () => guarded(async () => {
+	if (!await confirmAction(
+		'Remover todos os dispositivos FCM',
+		'Isso apagará do ESP32 todos os destinos de notificação salvos, inclusive dispositivos de teste. As credenciais Firebase serão mantidas.'
+	)) return
+	pushTransitioning = true
+	updatePushControl()
+	try {
+		const response = await sendCommandAndWait(
+			'FCM_CLEAR',
+			message => message === 'OK: dispositivos FCM removidos' || message.startsWith('ERRO:'),
+			BLE_COMMAND_TIMEOUT_MS
+		)
+		if (response.startsWith('ERRO:')) throw new Error(response)
+		try { localStorage.removeItem(pairedFcmTokenKey) } catch (_) { }
+		$('pushState').textContent = 'Destinos FCM removidos do ESP32. As credenciais Firebase foram mantidas.'
+		log(response, 'success')
+	} finally {
+		pushTransitioning = false
+		updatePushControl()
+	}
+}))
+
 if (typeof navigator.permissions?.query === 'function') {
 	navigator.permissions.query({ name: 'notifications' }).then(status => {
 		status.addEventListener('change', () => { void syncPushAuthorization() })
@@ -1005,9 +1035,9 @@ if (typeof navigator.permissions?.query === 'function') {
 
 let fcmPairPromise = null
 
-async function removePairedFcmDevice() {
+async function removePairedFcmDevice(tokenOverride = '') {
 	if (!isConnected() || !hasCommandTransport()) throw new Error('Conecte ao firmware para remover este dispositivo.')
-	let token = currentFcmToken
+	let token = tokenOverride || currentFcmToken
 	if (!token) {
 		try { token = localStorage.getItem(pairedFcmTokenKey) || '' } catch (_) { }
 	}
@@ -1030,9 +1060,9 @@ async function removePairedFcmDevice() {
 		message => message === 'OK: dispositivo FCM removido' || message.startsWith('ERRO:')
 	)
 	if (removeAck.startsWith('ERRO:')) throw new Error(removeAck)
-	currentFcmToken = ''
+	if (currentFcmToken === token) currentFcmToken = ''
 	try {
-		localStorage.removeItem(pairedFcmTokenKey)
+		if (localStorage.getItem(pairedFcmTokenKey) === token) localStorage.removeItem(pairedFcmTokenKey)
 		localStorage.removeItem(fcmRemovalPendingKey)
 	} catch (_) { }
 }

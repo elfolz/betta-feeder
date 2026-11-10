@@ -193,10 +193,11 @@
 				</label>
 			</div>
 			<p class="helper small" id="pushState" aria-live="polite"></p>
-			<div id="notificationDetails" hidden>
-				<div class="status-actions">
+			<div class="status-actions">
 				<button id="pushTest" class="button button-ghost" disabled>Enviar notificação de teste</button>
-				</div>
+				<button id="clearFcmDevicesButton" class="button button-ghost" disabled>Remover todos os dispositivos FCM salvos</button>
+			</div>
+			<div id="notificationDetails" hidden>
 				<h3 class="notification-heading">Credenciais FCM do ESP32</h3>
 				<p class="helper small" id="firebaseConfigState" aria-live="polite">Conecte ao ESP32 para consultar a configuração.</p>
 				<form id="firebaseConfigForm" autocomplete="off">
@@ -273,7 +274,7 @@
 	<script src="./firebase-config.js" defer></script>
 	<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js" defer></script>
 	<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-compat.js" defer></script>
-	<script src="./app.js?v=55" defer></script>
+	<script src="./app.js?v=56" defer></script>
 </body>
 
 </html>
