@@ -69,25 +69,21 @@ static const float LOW_TEMPERATURE_LIMIT_C = 24.0f;
 static const float HIGH_TEMPERATURE_LIMIT_C = 28.0f;
 static const unsigned long TEMPERATURE_SAMPLE_MS = 2500;
 static const uint32_t TEMPERATURE_ALERT_INTERVAL_SECONDS = 30UL * 60UL;
-// 28BYJ-48 varies by gearbox. Start at 4076 halfsteps/revolution;
-// CAL_STEPS=NNNN via BLE permits adjusting after physical testing.
+// CAL_STEPS and persisted calibration stay expressed in half-step equivalents
+// for compatibility. The motor is driven in two-coil full-step mode below.
 uint16_t halfStepsPerRev = 4076;
 static const bool MOTOR_FORWARD = true; // invert if mechanical rotation is opposite
 static const uint8_t POCKETS = 15;
 static const uint8_t PORTIONS_PER_LOAD = 14;
-static const uint16_t STEP_DELAY_MS = 2;
-static const uint8_t JOG_HALF_STEPS = 32;
+static const uint16_t STEP_DELAY_MS = 4; // preserve the previous shaft speed after doubling step angle
+static const uint8_t JOG_FULL_STEPS = 16; // same travel as 32 previous half-steps
 static const uint16_t JOG_STEP_DELAY_MS = STEP_DELAY_MS;
 
-// 8-step half-step sequence, coils IN1..IN4
-static const uint8_t HALF_STEP_SEQ[8][4] = {
-  {1,0,0,0},
+// Two-coil full-step sequence: both phases stay energized at every step.
+static const uint8_t FULL_STEP_SEQ[4][4] = {
   {1,1,0,0},
-  {0,1,0,0},
   {0,1,1,0},
-  {0,0,1,0},
   {0,0,1,1},
-  {0,0,0,1},
   {1,0,0,1}
 };
 
@@ -523,21 +519,21 @@ void releaseMotor() {
   }
 }
 
-void doHalfStep(bool forward, uint16_t stepDelayMs = STEP_DELAY_MS) {
+void doFullStep(bool forward, uint16_t stepDelayMs = STEP_DELAY_MS) {
   static int seqIndex = 0;
-  if (forward) seqIndex = (seqIndex + 1) % 8;
-  else seqIndex = (seqIndex + 7) % 8;
+  if (forward) seqIndex = (seqIndex + 1) % 4;
+  else seqIndex = (seqIndex + 3) % 4;
 
   for (uint8_t pin = 0; pin < 4; pin++) {
-    digitalWrite(MOTOR_PINS[pin], HALF_STEP_SEQ[seqIndex][pin]);
+    digitalWrite(MOTOR_PINS[pin], FULL_STEP_SEQ[seqIndex][pin]);
   }
   delay(stepDelayMs);
 }
 
-// Number of half-steps from home (position 0) to a pocket index.
-// Rounded absolute positions avoid cumulative 273-step rounding drift.
+// Calibration remains in half-step equivalents; divide by two for full-step
+// drive. Rounded absolute positions avoid cumulative pocket-spacing drift.
 uint16_t stepsAtPosition(uint8_t position) {
-  return (uint16_t)lround((double)position * halfStepsPerRev / POCKETS);
+  return (uint16_t)lround((double)position * halfStepsPerRev / (2.0 * POCKETS));
 }
 
 void rotateToNextPocket(const char* source, bool settleForFood = true) {
@@ -551,13 +547,14 @@ void rotateToNextPocket(const char* source, bool settleForFood = true) {
   uint16_t stepsToMove;
 
   if (newPosition == 0) {
-    stepsToMove = halfStepsPerRev - oldSteps;
+    uint16_t fullStepsPerRev = (uint16_t)lround((double)halfStepsPerRev / 2.0);
+    stepsToMove = fullStepsPerRev - oldSteps;
   } else {
     stepsToMove = newSteps - oldSteps;
   }
 
   for (uint16_t i = 0; i < stepsToMove; i++) {
-    doHalfStep(MOTOR_FORWARD);
+    doFullStep(MOTOR_FORWARD);
   }
   releaseMotor();
 
@@ -579,7 +576,7 @@ bool jogMotor(bool forward) {
   motionInProgress = true;
   referenceValid = false;
   saveSettings();
-  for (uint8_t i = 0; i < JOG_HALF_STEPS; i++) doHalfStep(forward, JOG_STEP_DELAY_MS);
+  for (uint8_t i = 0; i < JOG_FULL_STEPS; i++) doFullStep(forward, JOG_STEP_DELAY_MS);
   releaseMotor();
   motionInProgress = false;
   saveSettings();
