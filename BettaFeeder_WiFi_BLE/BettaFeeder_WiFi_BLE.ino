@@ -1598,6 +1598,9 @@ void handleCommand(String cmd) {
   } else if (key == "SET_HOME") {
     // Manual home only. Align the EMPTY pocket at outlet; DO NOT use
     // this command as a shortcut to bypass a physical jam.
+    motorTestMode = false;
+    motorTestShots = 0;
+    motorTestNextEpoch = 0;
     rotorPosition = 0;
     portionsDispensed = 0;
     clearBatchFeedHistory();

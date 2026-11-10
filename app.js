@@ -42,6 +42,7 @@ let motorTestSupported = false
 let motorTestActive = false
 let motorTestShots = 0
 let motorTestNextEpoch = 0
+let homeCommandInProgress = false
 let receivingFeedHistory = false
 let feedHistoryEpochs = []
 const validFeedHistoryReasons = new Set([
@@ -78,7 +79,7 @@ function updateMotorTestControls() {
 	$('feed2').disabled = scheduleDisabled
 	$('saveTimesButton').disabled = scheduleDisabled
 	updateFeedButtonAvailability()
-	$('homeButton').disabled = !isConnected() || motorTestActive
+	$('homeButton').disabled = !isConnected() || motorTestActive || homeCommandInProgress
 	$('motorLeftButton').disabled = !isConnected() || motorTestActive
 	$('motorRightButton').disabled = !isConnected() || motorTestActive
 	$('reloadButton').disabled = motorTestActive || !(isConnected() && feedReferenceReady && reloadWaitingForRefill)
@@ -92,9 +93,12 @@ function updateMotorTestControls() {
 	if (!isConnected()) $('motorTestStatus').textContent = 'Conecte ao BettaFeeder para controlar o modo teste.'
 	else if (!motorTestSupported) $('motorTestStatus').textContent = 'O firmware conectado nao oferece modo teste.'
 	else if (motorTestActive) $('motorTestStatus').textContent = `Ativo · disparo ${Math.min(motorTestShots + 1, 9)}/9 nesta ativacao${nextTime ? ` · proximo: ${nextTime}` : ''}`
-	else if (motorTestShots >= 9) $('motorTestStatus').textContent = 'Concluido. Antes de abastecer racao real, alinhe o rotor e use SET_HOME para zerar a contagem.'
-	else if (motorTestShots > 0) $('motorTestStatus').textContent = 'Cancelado; disparos contam como porcoes. Antes de abastecer, alinhe o rotor e use SET_HOME.'
-	else $('motorTestStatus').textContent = testPortionsAvailable && feedReferenceReady && !reloadWaitingForRefill ? 'Desligado. O primeiro disparo será no próximo limite de 5 minutos; depois, serão 3 disparos com intervalo de 5 min, 3 de 10 min e 3 de 15 min.' : 'Passo 1: alinhe a cavidade vazia com a saída e clique em “Definir posição inicial”. Passo 2: confirme a recarga no PWA para liberar 9 porções lógicas.'
+	else if (motorTestShots >= 9) $('motorTestStatus').textContent = 'Concluido. Antes de abastecer racao real, alinhe o rotor e use Definir posição inicial para zerar a contagem.'
+	else if (motorTestShots > 0) $('motorTestStatus').textContent = 'Cancelado; disparos contam como porcoes. Antes de abastecer, alinhe o rotor e use Definir posição inicial.'
+	else if (!feedReferenceReady) $('motorTestStatus').textContent = 'Passo 1: alinhe a cavidade vazia com a saída e clique em “Definir posição inicial”. Passo 2: confirme a recarga no PWA para liberar 9 porções lógicas.'
+	else if (reloadWaitingForRefill) $('motorTestStatus').textContent = 'Posição inicial definida. Confirme a recarga no PWA para liberar 9 porções lógicas.'
+	else if (!testPortionsAvailable) $('motorTestStatus').textContent = 'São necessárias pelo menos 9 porções lógicas disponíveis para iniciar o modo teste.'
+	else $('motorTestStatus').textContent = 'Desligado. O primeiro disparo será no próximo limite de 5 minutos; depois, serão 3 disparos com intervalo de 5 min, 3 de 10 min e 3 de 15 min.'
 }
 
 function log(message, kind = 'info', occurredAt) {
@@ -954,10 +958,27 @@ for (const [buttonId, command] of [['motorLeftButton', 'JOG_LEFT'], ['motorRight
 }
 $('homeButton').addEventListener('click', () => guarded(async () => {
 	if (!await confirmAction('Definir posição inicial', 'Confirma que a cavidade vazia está alinhada com a saída? Isso reinicia a contagem e o histórico do lote; será necessário reabastecer e confirmar a recarga.')) return
-	const response = await sendCommandAndWait('SET_HOME', message => message.startsWith('OK:') || message.startsWith('ERRO:'), 15000)
-	if (!response.startsWith('OK:')) throw new Error(`ESP32: ${response}`)
-	await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
-	await requestFeedingHistory(false)
+	const button = $('homeButton')
+	const label = $('homeButtonLabel')
+	homeCommandInProgress = true
+	button.disabled = true
+	button.classList.add('is-loading')
+	button.setAttribute('aria-busy', 'true')
+	label.textContent = 'Definindo posição...'
+	updateMotorTestControls()
+	try {
+		const response = await sendCommandAndWait('SET_HOME', message => message.startsWith('OK:') || message.startsWith('ERRO:'), 15000)
+		if (!response.startsWith('OK:')) throw new Error(`ESP32: ${response}`)
+		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
+		await requestFeedingHistory(false)
+		toast('Posição inicial definida; contagem de teste zerada')
+	} finally {
+		homeCommandInProgress = false
+		button.classList.remove('is-loading')
+		button.removeAttribute('aria-busy')
+		label.textContent = 'Definir posição inicial'
+		updateMotorTestControls()
+	}
 }))
 $('reloadButton').addEventListener('click', () => guarded(async () => {
 	if (!await confirmAction('Confirmar recarga', 'Confirma que a recarga foi concluída? O ESP32 vai estacionar o rotor e liberar as próximas alimentações.')) return
