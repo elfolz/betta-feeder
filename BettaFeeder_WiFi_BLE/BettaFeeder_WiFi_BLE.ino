@@ -137,7 +137,7 @@ bool suppressOverdueAfterReload = false;
 bool motorTestMode = false;
 uint8_t motorTestShots = 0;
 uint32_t motorTestNextEpoch = 0;
-static const uint32_t MOTOR_TEST_INTERVALS_SECONDS[3] = {900UL, 1800UL, 3600UL};
+static const uint32_t MOTOR_TEST_INTERVALS_SECONDS[3] = {300UL, 600UL, 900UL};
 String lastScheduleBlockLog;
 bool clockAvailabilityLogged = false;
 OneWire oneWire(DS18B20_PIN);
@@ -1181,7 +1181,7 @@ void processMotorTestSchedule() {
   uint32_t nowEpoch = static_cast<uint32_t>(currentTime);
   if (motorTestNextEpoch == 0) {
     // Quarter-hour boundaries are also local quarter hours in BRT (UTC-3).
-    motorTestNextEpoch = (nowEpoch / 900UL + 1UL) * 900UL;
+    motorTestNextEpoch = (nowEpoch / MOTOR_TEST_INTERVALS_SECONDS[0] + 1UL) * MOTOR_TEST_INTERVALS_SECONDS[0];
     notifyBLE(String("MOTOR_TEST_NEXT:") + motorTestNextEpoch);
   }
   if (nowEpoch < motorTestNextEpoch) return;
@@ -1511,7 +1511,7 @@ void handleCommand(String cmd) {
           return;
         }
         motorTestShots = 0;
-        motorTestNextEpoch = (static_cast<uint32_t>(now) / 900UL + 1UL) * 900UL;
+        motorTestNextEpoch = (static_cast<uint32_t>(now) / MOTOR_TEST_INTERVALS_SECONDS[0] + 1UL) * MOTOR_TEST_INTERVALS_SECONDS[0];
         motorTestMode = true;
         saveSettings();
         time_t nextTime = motorTestNextEpoch;
