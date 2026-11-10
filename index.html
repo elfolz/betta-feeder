@@ -90,11 +90,27 @@
 			</div>
 			<div class="status-actions">
 				<button id="testFeedButton" class="button button-primary" type="button" aria-busy="false" disabled><span class="connect-spinner" aria-hidden="true"></span><span class="feed-button-label">Alimentar agora</span></button>
-				<button id="homeButton" class="button button-ghost" disabled>Definir posição inicial</button>
-				<button id="reloadButton" class="button button-secondary" disabled>Confirmar recarga</button>
+				<button id="reloadButton" class="button button-secondary" disabled><span class="connect-spinner" aria-hidden="true"></span><span class="reload-button-label">Confirmar recarga</span></button>
 			</div>
 			<p class="helper small" id="batchStatus">Referência ainda não verificada.</p>
-			<p class="helper small">A posição do rotor é salva a cada rotação e restaurada sem movimento após reinício. Se faltar energia durante uma rotação, alinhe manualmente a cavidade vazia e defina a posição inicial. Após 14 porções, o alimentador envia uma notificação e para; reabasteça e confirme aqui. O motor só gira ao alimentar agora ou nos horários programados.</p>
+			<p class="helper small">Após 14 porções, reabasteça e confirme aqui.</p>
+		</section>
+
+		<section class="panel motor-alignment-panel">
+			<div class="card-heading">
+				<div>
+					<div class="section-kicker">AJUSTE MANUAL</div>
+					<h2>Alinhamento do motor</h2>
+				</div>
+			</div>
+			<p class="helper">Use as setas para mover o rotor em passos curtos. Alinhe a cavidade vazia com a saída e defina a posição inicial. Isso reinicia o histórico e a contagem do lote; será necessário reabastecer e confirmar a recarga.</p>
+			<div class="motor-alignment-actions">
+				<div class="motor-jog-controls" role="group" aria-label="Ajuste manual do rotor">
+					<button id="motorLeftButton" class="button button-ghost motor-jog-button" type="button" aria-label="Girar rotor para a esquerda" title="Girar rotor para a esquerda" disabled>←</button>
+					<button id="motorRightButton" class="button button-ghost motor-jog-button" type="button" aria-label="Girar rotor para a direita" title="Girar rotor para a direita" disabled>→</button>
+				</div>
+				<button id="homeButton" class="button button-secondary" disabled>Definir posição inicial</button>
+			</div>
 		</section>
 
 		<section class="panel">
@@ -257,7 +273,7 @@
 	<script src="./firebase-config.js" defer></script>
 	<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js" defer></script>
 	<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-compat.js" defer></script>
-	<script src="./app.js?v=42" defer></script>
+	<script src="./app.js?v=55" defer></script>
 </body>
 
 </html>

@@ -7,6 +7,8 @@
 
   Arduino IDE:
   - Board package: "esp32 by Espressif Systems"
+  - For 4 MB flash, select partition scheme "No FS (2MB APP x2)"; the default
+    1.2 MB app partition is too small for this firmware.
   - BLE uses NimBLE-Arduino, a lower-memory alternative to Bluedroid.
   - No DS3231 / RTC module required.
 
@@ -40,6 +42,7 @@
 #include <Preferences.h>
 #include <NimBLEDevice.h>
 #include <NimBLEServer.h>
+#include <NimBLECppVersion.h>
 #include <NimBLEUtils.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -48,6 +51,9 @@
 #include <cstring>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/sha256.h>
 #include <mbedtls/base64.h>
@@ -62,7 +68,7 @@ static const uint8_t DS18B20_PIN = 4;
 static const float LOW_TEMPERATURE_LIMIT_C = 24.0f;
 static const float HIGH_TEMPERATURE_LIMIT_C = 28.0f;
 static const unsigned long TEMPERATURE_SAMPLE_MS = 2500;
-static const unsigned long TEMPERATURE_ALERT_INTERVAL_MS = 30UL * 60UL * 1000UL;
+static const uint32_t TEMPERATURE_ALERT_INTERVAL_SECONDS = 30UL * 60UL;
 // 28BYJ-48 varies by gearbox. Start at 4076 halfsteps/revolution;
 // CAL_STEPS=NNNN via BLE permits adjusting after physical testing.
 uint16_t halfStepsPerRev = 4076;
@@ -70,6 +76,7 @@ static const bool MOTOR_FORWARD = true; // invert if mechanical rotation is oppo
 static const uint8_t POCKETS = 15;
 static const uint8_t PORTIONS_PER_LOAD = 14;
 static const uint16_t STEP_DELAY_MS = 2;
+static const uint8_t JOG_HALF_STEPS = 32;
 
 // 8-step half-step sequence, coils IN1..IN4
 static const uint8_t HALF_STEP_SEQ[8][4] = {
@@ -95,6 +102,9 @@ bool bleConnected = false;
 portMUX_TYPE commandMux = portMUX_INITIALIZER_UNLOCKED;
 char pendingCommand[192] = {0};
 volatile bool commandPending = false;
+volatile bool pushNetworkBusy = false;
+SemaphoreHandle_t pushQueueMutex = nullptr;
+TaskHandle_t pushWorkerHandle = nullptr;
 
 // ---------- Persistent settings ----------
 Preferences prefs;
@@ -131,14 +141,13 @@ bool temperatureConversionPending = false;
 unsigned long temperatureConversionStarted = 0;
 unsigned long lastTemperatureRequest = 0;
 bool lowTemperatureAlertActive = false;
-unsigned long lastLowTemperatureAlert = 0;
+uint32_t lastLowTemperatureAlertEpoch = 0;
 bool highTemperatureAlertActive = false;
-unsigned long lastHighTemperatureAlert = 0;
+uint32_t lastHighTemperatureAlertEpoch = 0;
 
 // ---------- Wi-Fi / clock ----------
 bool ntpConfigured = false;
 unsigned long lastWiFiAttempt = 0;
-unsigned long lastStatusCheck = 0;
 bool wifiConnecting = false;
 static const unsigned long WIFI_RETRY_MS = 30000;
 static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 15000;
@@ -242,6 +251,7 @@ void emitBatchFeedHistory() {
 }
 
 void saveDeviceLog(const String& message) {
+  if (message.startsWith("Push:")) return;
   DeviceLogRecord record{};
   time_t now = time(nullptr);
   if (now >= 1735689600) record.epoch = static_cast<uint32_t>(now);
@@ -262,6 +272,7 @@ void emitDeviceLogs() {
     DeviceLogRecord record{};
     uint8_t slot = (first + i) % DEVICE_LOG_CAPACITY;
     if (prefs.getBytes(deviceLogKey(slot).c_str(), &record, sizeof(record)) != sizeof(record)) continue;
+    if (strncmp(record.message, "Push:", 5) == 0) continue;
     notifyBLE(String("LOG:") + String(record.epoch) + ":" + String(record.message));
     delay(25);
   }
@@ -325,7 +336,9 @@ void notifyBLE(const String& message) {
 void notifyPushLog(const String& message) {
   // Nunca inclua o token FCM, a chave privada ou o corpo completo de credenciais.
   saveDeviceLog(String("Push: ") + message);
-  notifyBLE(String("PUSH: ") + message);
+  // Push diagnostics stay on USB serial only; they must not flood the PWA log
+  // or delay BLE command handling with fragmented notifications.
+  Serial.println(String("Push: ") + message);
 }
 
 void saveSettings() {
@@ -382,19 +395,24 @@ bool removeFcmToken(const String& token) {
 bool hasFcmDevices() { return fcmTargetCount > 0; }
 
 void clearQueuedPushes();
+bool hasPendingPush();
 
 void clearFirebaseCredentialsIfNoDevices() {
   if (hasFcmDevices()) return;
   bool hadCredentials = !firebaseProjectId.isEmpty() || !firebaseClientEmail.isEmpty() || !firebasePrivateKey.isEmpty();
   clearQueuedPushes();
   firebaseProjectId = ""; firebaseClientEmail = ""; firebasePrivateKey = "";
-  prefs.remove("fbProject"); prefs.remove("fbEmail"); prefs.remove("fbKey");
+  prefs.remove("fbProject"); prefs.remove("fbEmail"); prefs.remove("fbKey"); prefs.remove("fbKeyBin");
   oauthAccessToken = ""; oauthExpiresAtMs = 0;
   if (hadCredentials) notifyPushLog("nenhum dispositivo FCM cadastrado; credenciais Firebase apagadas");
 }
 
 void loadSettings() {
   prefs.begin("bettafeed", false);
+  lowTemperatureAlertActive = prefs.getBool("tempLowOn", false);
+  lastLowTemperatureAlertEpoch = prefs.getUInt("tempLowAt", 0);
+  highTemperatureAlertActive = prefs.getBool("tempHighOn", false);
+  lastHighTemperatureAlertEpoch = prefs.getUInt("tempHighAt", 0);
   wifiSSID = prefs.getString("ssid", "");
   fcmTargetCount = prefs.getUChar("fcmCount", 0);
   if (fcmTargetCount > FCM_DEVICE_CAPACITY) fcmTargetCount = 0;
@@ -405,7 +423,18 @@ void loadSettings() {
   }
   firebaseProjectId = prefs.getString("fbProject", "");
   firebaseClientEmail = prefs.getString("fbEmail", "");
-  firebasePrivateKey = prefs.getString("fbKey", "");
+  firebasePrivateKey = "";
+  size_t savedKeyLength = prefs.getBytesLength("fbKeyBin");
+  if (savedKeyLength > 1 && savedKeyLength <= 1901) {
+    char* savedKey = (char*)malloc(savedKeyLength);
+    if (savedKey) {
+      if (prefs.getBytes("fbKeyBin", savedKey, savedKeyLength) == savedKeyLength) {
+        firebasePrivateKey = String(savedKey);
+      }
+      free(savedKey);
+    }
+  }
+  if (firebasePrivateKey.isEmpty()) firebasePrivateKey = prefs.getString("fbKey", "");
   wifiPASS = prefs.getString("pass", "");
   feedMinute[0] = prefs.getUShort("feed1", 8 * 60);
   feedMinute[1] = prefs.getUShort("feed2", 20 * 60);
@@ -498,6 +527,23 @@ void rotateToNextPocket() {
   motionInProgress = false;
   saveSettings();
   delay(250); // allow pellets to fall before another movement
+}
+
+bool jogMotor(bool forward) {
+  if (feedInProgress || motionInProgress) {
+    notifyBLE("BLOQUEADO: motor ocupado.");
+    return false;
+  }
+  // A jog changes the physical rotor angle without a sensor to track it.
+  // Invalidate the old pocket reference until the user aligns and sets home.
+  motionInProgress = true;
+  referenceValid = false;
+  saveSettings();
+  for (uint8_t i = 0; i < JOG_HALF_STEPS; i++) doHalfStep(forward);
+  releaseMotor();
+  motionInProgress = false;
+  saveSettings();
+  return true;
 }
 
 
@@ -814,7 +860,7 @@ void processFcmMaintenance() {
     nextFcmValidationAt = 0;
     return;
   }
-  if (!pendingPushEvent.isEmpty()) return;
+  if (hasPendingPush()) return;
   if ((int32_t)(millis() - nextFcmValidationAt) < 0) return;
 
   connectWiFiIfNeeded();
@@ -850,42 +896,79 @@ void processFcmMaintenance() {
 }
 // Fila em RAM para reenvio periodico; reiniciar pode perder eventos pendentes.
 
+void promoteNextPushLocked() {
+  if (!pendingPushEvent.isEmpty() || deferredPushCount == 0) return;
+  pendingPushEvent = deferredPushes[0].event;
+  pendingPushText = deferredPushes[0].text;
+  for (uint8_t i = 1; i < deferredPushCount; i++) deferredPushes[i - 1] = deferredPushes[i];
+  deferredPushCount--;
+  pushNextAttempt = 0;
+}
+
+void clearQueuedPushesLocked() {
+  pendingPushEvent = "";
+  pendingPushText = "";
+  for (uint8_t i = 0; i < PUSH_QUEUE_CAPACITY; i++) {
+    deferredPushes[i].event = "";
+    deferredPushes[i].text = "";
+  }
+  deferredPushCount = 0;
+  pushNextAttempt = 0;
+}
+
 void queuePush(const String& event, const String& text) {
   if (!pushDeliveryConfigured()) return;
+  bool updated = false;
+  bool dropped = false;
+  xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
   if (pendingPushEvent.isEmpty()) {
     pendingPushEvent = event;
     pendingPushText = text;
     pushNextAttempt = 0;
   } else if (pendingPushEvent == event) {
     pendingPushText = text;
+    pushNextAttempt = 0;
   } else {
     for (uint8_t i = 0; i < deferredPushCount; i++) {
       if (deferredPushes[i].event == event) {
         deferredPushes[i].text = text;
-        notifyPushLog(String("evento atualizado na fila: ") + event);
-        return;
+        updated = true;
+        break;
       }
     }
-    if (deferredPushCount >= PUSH_QUEUE_CAPACITY) {
-      notifyPushLog(String("fila cheia; evento descartado: ") + event);
-      return;
+    if (!updated && deferredPushCount >= PUSH_QUEUE_CAPACITY) {
+      dropped = true;
+    } else if (!updated) {
+      deferredPushes[deferredPushCount].event = event;
+      deferredPushes[deferredPushCount].text = text;
+      deferredPushCount++;
     }
-    deferredPushes[deferredPushCount].event = event;
-    deferredPushes[deferredPushCount].text = text;
-    deferredPushCount++;
   }
-  notifyPushLog(String("evento enfileirado: ") + event);
+  xSemaphoreGive(pushQueueMutex);
+  if (dropped) notifyPushLog(String("fila cheia; evento descartado: ") + event);
+  else notifyPushLog(String(updated ? "evento atualizado na fila: " : "evento enfileirado: ") + event);
 }
 
 bool hasQueuedPush(const String& event) {
-  if (pendingPushEvent == event) return true;
+  bool found = false;
+  xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
+  if (pendingPushEvent == event) found = true;
   for (uint8_t i = 0; i < deferredPushCount; i++) {
-    if (deferredPushes[i].event == event) return true;
+    if (deferredPushes[i].event == event) found = true;
   }
-  return false;
+  xSemaphoreGive(pushQueueMutex);
+  return found;
+}
+
+bool hasPendingPush() {
+  xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
+  const bool pending = !pendingPushEvent.isEmpty();
+  xSemaphoreGive(pushQueueMutex);
+  return pending;
 }
 
 void cancelQueuedPush(const String& event) {
+  xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
   if (pendingPushEvent == event) {
     pendingPushEvent = "";
     pendingPushText = "";
@@ -899,48 +982,44 @@ void cancelQueuedPush(const String& event) {
     for (uint8_t j = i + 1; j < deferredPushCount; j++) deferredPushes[j - 1] = deferredPushes[j];
     deferredPushCount--;
   }
-  if (pendingPushEvent.isEmpty() && deferredPushCount > 0) {
-    pendingPushEvent = deferredPushes[0].event;
-    pendingPushText = deferredPushes[0].text;
-    for (uint8_t i = 1; i < deferredPushCount; i++) deferredPushes[i - 1] = deferredPushes[i];
-    deferredPushCount--;
-    pushNextAttempt = 0;
-  }
-}
-
-void promoteNextPush() {
-  if (!pendingPushEvent.isEmpty() || deferredPushCount == 0) return;
-  pendingPushEvent = deferredPushes[0].event;
-  pendingPushText = deferredPushes[0].text;
-  for (uint8_t i = 1; i < deferredPushCount; i++) deferredPushes[i - 1] = deferredPushes[i];
-  deferredPushCount--;
-  pushNextAttempt = 0;
+  promoteNextPushLocked();
+  xSemaphoreGive(pushQueueMutex);
 }
 
 void clearQueuedPushes() {
-  pendingPushEvent = "";
-  pendingPushText = "";
-  for (uint8_t i = 0; i < PUSH_QUEUE_CAPACITY; i++) {
-    deferredPushes[i].event = "";
-    deferredPushes[i].text = "";
-  }
-  deferredPushCount = 0;
-  pushNextAttempt = 0;
+  xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
+  clearQueuedPushesLocked();
+  xSemaphoreGive(pushQueueMutex);
 }
 
 void processPush() {
+  String deliveredEvent;
+  String deliveredText;
   if (!pushDeliveryConfigured()) {
-    if (!pendingPushEvent.isEmpty() || deferredPushCount > 0) clearQueuedPushes();
+    xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
+    if (!pendingPushEvent.isEmpty() || deferredPushCount > 0) clearQueuedPushesLocked();
+    xSemaphoreGive(pushQueueMutex);
     return;
   }
-  if (pendingPushEvent.isEmpty() || (int32_t)(millis() - pushNextAttempt) < 0) return;
+  xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
+  const bool hasDuePush = !pendingPushEvent.isEmpty() &&
+    (int32_t)(millis() - pushNextAttempt) >= 0;
+  if (hasDuePush) {
+    deliveredEvent = pendingPushEvent;
+    deliveredText = pendingPushText;
+  }
+  xSemaphoreGive(pushQueueMutex);
+  if (!hasDuePush) return;
 
   // Primeiro inicia/continua a conexao Wi-Fi. O loop antigo tentava o FCM
   // antes desta funcao e acabava adiando o push por 60 segundos.
   connectWiFiIfNeeded();
   if (WiFi.status() != WL_CONNECTED || !clockIsValid()) {
     unsigned long now = millis();
-    pushNextAttempt = now + PUSH_WIFI_WAIT_MS;
+    xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
+    if (pendingPushEvent == deliveredEvent && pendingPushText == deliveredText)
+      pushNextAttempt = now + PUSH_WIFI_WAIT_MS;
+    xSemaphoreGive(pushQueueMutex);
     if (now - lastPushWifiLog >= 15000 || lastPushWifiLog == 0) {
       lastPushWifiLog = now;
       notifyPushLog(WiFi.status() != WL_CONNECTED
@@ -950,18 +1029,25 @@ void processPush() {
     return;
   }
 
-  const String deliveredEvent = pendingPushEvent;
-  if (deliverPush("BettaFeeder", pendingPushText)) {
-    pendingPushEvent = ""; pendingPushText = "";
+  if (deliverPush("BettaFeeder", deliveredText)) {
+    xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
+    if (pendingPushEvent == deliveredEvent && pendingPushText == deliveredText) {
+      pendingPushEvent = "";
+      pendingPushText = "";
+      promoteNextPushLocked();
+    }
+    xSemaphoreGive(pushQueueMutex);
     if (deliveredEvent == "EMPTY" || deliveredEvent == "EMPTY_REMINDER") {
       lastEmptyReminderEpoch = static_cast<uint32_t>(time(nullptr));
       prefs.putUInt("emptyReminder", lastEmptyReminderEpoch);
     }
     notifyPushLog("push entregue com sucesso");
-    promoteNextPush();
     nextFcmValidationAt = millis() + FCM_VALIDATION_INTERVAL_MS;
   } else {
-    pushNextAttempt = millis() + PUSH_RETRY_MS;
+    xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
+    if (pendingPushEvent == deliveredEvent && pendingPushText == deliveredText)
+      pushNextAttempt = millis() + PUSH_RETRY_MS;
+    xSemaphoreGive(pushQueueMutex);
     notifyPushLog(String("push falhou; nova tentativa em ") + (PUSH_RETRY_MS / 1000) + "s");
   }
 }
@@ -1069,14 +1155,13 @@ void processSchedule() {
   struct tm nowTm;
   if (!clockIsValid(&nowTm)) {
     if (!clockAvailabilityLogged) {
-      appendFeedHistory(false, "time_unavailable", portionsDispensed < PORTIONS_PER_LOAD ? portionsDispensed + 1 : 0, 0);
       saveDeviceLog("Agendamento suspenso: aguardando sincronizacao do horario NTP.");
       clockAvailabilityLogged = true;
     }
     return;
   }
   if (clockAvailabilityLogged) {
-    saveDeviceLog("Horario NTP sincronizado; agendamento ativo.");
+    saveDeviceLog("Agendamento restabelecido apos sincronizacao do horario NTP.");
     clockAvailabilityLogged = false;
   }
 
@@ -1158,7 +1243,7 @@ void processSchedule() {
 
 void sendStatus() {
   struct tm t;
-  uint8_t portionsRemaining = portionsDispensed >= PORTIONS_PER_LOAD
+  uint8_t portionsRemaining = awaitingReload || portionsDispensed >= PORTIONS_PER_LOAD
     ? 0
     : PORTIONS_PER_LOAD - portionsDispensed;
   String s = "STATUS;wifi=" + String(WiFi.status() == WL_CONNECTED ? "conectado" : "desconectado");
@@ -1200,39 +1285,56 @@ void processTemperature() {
     temperatureConversionPending = false;
     waterTemperatureC = measured;
     if (measured == DEVICE_DISCONNECTED_C || !isfinite(measured)) {
-      lowTemperatureAlertActive = false;
-      lastLowTemperatureAlert = 0;
-      highTemperatureAlertActive = false;
-      lastHighTemperatureAlert = 0;
-      cancelQueuedPush("TEMPERATURA_BAIXA");
-      cancelQueuedPush("TEMPERATURA_ALTA");
+      // A transient sensor read failure is not evidence that the water
+      // returned to a safe range; retain alert state and its repeat timer.
       return;
     }
 
+    time_t epochNow = time(nullptr);
+    const bool hasValidClock = clockIsValid() && epochNow >= 1735689600;
+    const uint32_t nowEpoch = hasValidClock ? static_cast<uint32_t>(epochNow) : 0;
+
     if (measured < LOW_TEMPERATURE_LIMIT_C &&
-        (!lowTemperatureAlertActive || now - lastLowTemperatureAlert >= TEMPERATURE_ALERT_INTERVAL_MS)) {
+        (!lowTemperatureAlertActive || (nowEpoch && lastLowTemperatureAlertEpoch &&
+          static_cast<uint32_t>(nowEpoch - lastLowTemperatureAlertEpoch) >= TEMPERATURE_ALERT_INTERVAL_SECONDS))) {
       lowTemperatureAlertActive = true;
-      lastLowTemperatureAlert = now;
+      lastLowTemperatureAlertEpoch = nowEpoch;
+      prefs.putBool("tempLowOn", true);
+      prefs.putUInt("tempLowAt", lastLowTemperatureAlertEpoch);
       String alertText = "Temperatura da agua baixa: " + String(measured, 1) + " °C. Limite: 24 °C.";
       notifyBLE(String("ALERTA_TEMPERATURA: ") + alertText);
       queuePush("TEMPERATURA_BAIXA", alertText);
-    } else if (measured >= LOW_TEMPERATURE_LIMIT_C) {
+    } else if (measured >= LOW_TEMPERATURE_LIMIT_C + 0.5f) {
       lowTemperatureAlertActive = false;
-      lastLowTemperatureAlert = 0;
+      lastLowTemperatureAlertEpoch = 0;
+      prefs.putBool("tempLowOn", false);
+      prefs.putUInt("tempLowAt", 0);
       cancelQueuedPush("TEMPERATURA_BAIXA");
+    } else if (lowTemperatureAlertActive && !lastLowTemperatureAlertEpoch && nowEpoch) {
+      // Start the persistent 30-minute interval once NTP becomes available.
+      lastLowTemperatureAlertEpoch = nowEpoch;
+      prefs.putUInt("tempLowAt", lastLowTemperatureAlertEpoch);
     }
 
     if (measured > HIGH_TEMPERATURE_LIMIT_C &&
-        (!highTemperatureAlertActive || now - lastHighTemperatureAlert >= TEMPERATURE_ALERT_INTERVAL_MS)) {
+        (!highTemperatureAlertActive || (nowEpoch && lastHighTemperatureAlertEpoch &&
+          static_cast<uint32_t>(nowEpoch - lastHighTemperatureAlertEpoch) >= TEMPERATURE_ALERT_INTERVAL_SECONDS))) {
       highTemperatureAlertActive = true;
-      lastHighTemperatureAlert = now;
+      lastHighTemperatureAlertEpoch = nowEpoch;
+      prefs.putBool("tempHighOn", true);
+      prefs.putUInt("tempHighAt", lastHighTemperatureAlertEpoch);
       String alertText = "Temperatura da agua alta: " + String(measured, 1) + " °C. Limite: 28 °C.";
       notifyBLE(String("ALERTA_TEMPERATURA: ") + alertText);
       queuePush("TEMPERATURA_ALTA", alertText);
-    } else if (measured <= HIGH_TEMPERATURE_LIMIT_C) {
+    } else if (measured <= HIGH_TEMPERATURE_LIMIT_C - 0.5f) {
       highTemperatureAlertActive = false;
-      lastHighTemperatureAlert = 0;
+      lastHighTemperatureAlertEpoch = 0;
+      prefs.putBool("tempHighOn", false);
+      prefs.putUInt("tempHighAt", 0);
       cancelQueuedPush("TEMPERATURA_ALTA");
+    } else if (highTemperatureAlertActive && !lastHighTemperatureAlertEpoch && nowEpoch) {
+      lastHighTemperatureAlertEpoch = nowEpoch;
+      prefs.putUInt("tempHighAt", lastHighTemperatureAlertEpoch);
     }
   }
 
@@ -1307,6 +1409,10 @@ void handleCommand(String cmd) {
     sendStatus();
   } else if (key == "FEED") {
     feedOnePortion("MANUAL");
+  } else if (key == "JOG_LEFT") {
+    if (jogMotor(false)) notifyBLE("OK: JOG_LEFT");
+  } else if (key == "JOG_RIGHT") {
+    if (jogMotor(true)) notifyBLE("OK: JOG_RIGHT");
   } else if (key == "SET_HOME") {
     // Manual home only. Align the EMPTY pocket at outlet; DO NOT use
     // this command as a shortcut to bypass a physical jam.
@@ -1365,6 +1471,7 @@ void handleCommand(String cmd) {
       return;
     }
     pendingFirebaseProjectId += value;
+    notifyBLE("OK: PRJ_ADD");
   } else if (key == "PRJ_SAVE") {
     if (!firebaseConfigEditing || expectedFirebaseProjectLength == 0 ||
         pendingFirebaseProjectId.length() != expectedFirebaseProjectLength) {
@@ -1403,6 +1510,7 @@ void handleCommand(String cmd) {
       return;
     }
     pendingFirebaseClientEmail += value;
+    notifyBLE("OK: EML_ADD");
   } else if (key == "EML_SAVE") {
     if (!firebaseConfigEditing || expectedFirebaseEmailLength == 0 ||
         pendingFirebaseClientEmail.length() != expectedFirebaseEmailLength ||
@@ -1430,6 +1538,7 @@ void handleCommand(String cmd) {
       return;
     }
     pendingFirebasePrivateKey += value;
+    notifyBLE("OK: PK_ADD");
   } else if (key == "PK_SAVE") {
     if (!firebaseConfigEditing || expectedFirebasePrivateKeyLength == 0 ||
         pendingFirebasePrivateKey.length() != expectedFirebasePrivateKeyLength ||
@@ -1448,15 +1557,32 @@ void handleCommand(String cmd) {
       notifyBLE("ERRO: credenciais Firebase incompletas.");
       return;
     }
-    if (!prefs.putString("fbProject", pendingFirebaseProjectId) ||
-        !prefs.putString("fbEmail", pendingFirebaseClientEmail) ||
-        !prefs.putString("fbKey", pendingFirebasePrivateKey) ||
-        prefs.getString("fbProject", "") != pendingFirebaseProjectId ||
-        prefs.getString("fbEmail", "") != pendingFirebaseClientEmail ||
-        prefs.getString("fbKey", "") != pendingFirebasePrivateKey) {
-      notifyBLE("ERRO: nao foi possivel salvar as credenciais Firebase.");
+    size_t freeEntriesBefore = prefs.freeEntries();
+    size_t projectWritten = prefs.putString("fbProject", pendingFirebaseProjectId);
+    size_t emailWritten = prefs.putString("fbEmail", pendingFirebaseClientEmail);
+    size_t keySize = pendingFirebasePrivateKey.length() + 1;
+    size_t keyWritten = prefs.putBytes("fbKeyBin", pendingFirebasePrivateKey.c_str(), keySize);
+    String savedProject = prefs.getString("fbProject", "");
+    String savedEmail = prefs.getString("fbEmail", "");
+    size_t savedKeySize = prefs.getBytesLength("fbKeyBin");
+    char* savedKeyBuffer = savedKeySize == keySize ? (char*)malloc(savedKeySize) : nullptr;
+    bool savedKeyMatches = false;
+    if (savedKeyBuffer) {
+      savedKeyMatches = prefs.getBytes("fbKeyBin", savedKeyBuffer, savedKeySize) == savedKeySize &&
+        memcmp(savedKeyBuffer, pendingFirebasePrivateKey.c_str(), keySize) == 0;
+      free(savedKeyBuffer);
+    }
+    if (!projectWritten || !emailWritten || !keyWritten ||
+        savedProject != pendingFirebaseProjectId ||
+        savedEmail != pendingFirebaseClientEmail ||
+        !savedKeyMatches) {
+      notifyBLE(String("ERRO: NVS Firebase; gravado=") + projectWritten + "," + emailWritten + "," + keyWritten +
+                "; lido=" + savedProject.length() + "," + savedEmail.length() + "," + savedKeySize +
+                "; esperado=" + pendingFirebaseProjectId.length() + "," + pendingFirebaseClientEmail.length() +
+                "," + keySize + "; livres=" + freeEntriesBefore);
       return;
     }
+    prefs.remove("fbKey");
     firebaseProjectId = pendingFirebaseProjectId;
     firebaseClientEmail = pendingFirebaseClientEmail;
     firebasePrivateKey = pendingFirebasePrivateKey;
@@ -1496,8 +1622,9 @@ void handleCommand(String cmd) {
       notifyBLE("ERRO: fragmento FCM invalido"); return;
     }
     pendingFcmToken += value;
-    // Nao envie log por fragmento: isso congestiona o mesmo canal BLE usado
-    // pelo PWA para transmitir o proximo FCM_ADD.
+    // Confirma cada fragmento para o PWA aguardar o processamento no loop antes
+    // de enviar o proximo; a resposta do GATT so confirma a escrita BLE.
+    notifyBLE("OK: FCM_ADD");
   } else if (key == "FCM_SAVE" || key == "FCM_REMOVE") {
     if ((key == "FCM_REMOVE") != pendingFcmRemoval) { notifyBLE("ERRO: operacao FCM invalida"); return; }
     if (expectedFcmLength == 0 || pendingFcmToken.length() != expectedFcmLength) {
@@ -1546,7 +1673,7 @@ void handleCommand(String cmd) {
     ntpConfigured = false;
     notifyBLE("OK: dados Wi-Fi apagados.");
   } else {
-    notifyBLE("ERRO: comando desconhecido. Use STATUS, FEED, TIMES, SET_HOME, RELOAD, FCM_*, FB_BEGIN, PRJ_*, EML_*, PK_*, FB_SAVE, BLE_ON.");
+    notifyBLE("ERRO: comando desconhecido. Use STATUS, FEED, JOG_LEFT, JOG_RIGHT, TIMES, SET_HOME, RELOAD, FCM_*, FB_BEGIN, PRJ_*, EML_*, PK_*, FB_SAVE, BLE_ON.");
   }
 }
 
@@ -1567,6 +1694,22 @@ void processSerialCommands() {
   }
 }
 
+bool isFirebaseConfigCommand(const char* command) {
+  return strncmp(command, "FB_", 3) == 0 || strncmp(command, "FCM_", 4) == 0 ||
+    strncmp(command, "PRJ_", 4) == 0 || strncmp(command, "EML_", 4) == 0 ||
+    strncmp(command, "PK_", 3) == 0;
+}
+
+void pushWorkerTask(void*) {
+  for (;;) {
+    pushNetworkBusy = true;
+    processPush();
+    processFcmMaintenance();
+    pushNetworkBusy = false;
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+}
+
 // ---------- BLE callbacks ----------
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* server, NimBLEConnInfo& connInfo) override {
@@ -1579,11 +1722,19 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 };
 
 class RxCallbacks : public NimBLECharacteristicCallbacks {
+#if NIMBLE_CPP_VERSION >= NIMBLE_CPP_VERSION_VAL(3, 0, 0)
+  uint8_t onWrite(NimBLECharacteristic* characteristic,
+                  NimBLEAttValue& value,
+                  NimBLEConnInfo& connInfo) override {
+    if (value.length() == 0) return 0;
+    String command(value.c_str());
+#else
   void onWrite(NimBLECharacteristic* characteristic,
                NimBLEConnInfo& connInfo) override {
-    NimBLEAttValue value = characteristic->getValue();
-    if (value.length() == 0) return;
+    const std::string value = characteristic->getValue();
+    if (value.empty()) return;
     String command(value.c_str());
+#endif
 
     portENTER_CRITICAL(&commandMux);
     size_t n = command.length();
@@ -1592,6 +1743,9 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
     pendingCommand[n] = '\0';
     commandPending = true;
     portEXIT_CRITICAL(&commandMux);
+#if NIMBLE_CPP_VERSION >= NIMBLE_CPP_VERSION_VAL(3, 0, 0)
+    return 0;
+#endif
   }
 };
 
@@ -1604,7 +1758,11 @@ void startBLE() {
   // solicite MTU 247, pois isso aumenta o consumo de memoria do BLE.
   NimBLEDevice::setMTU(23);
   NimBLEServer* server = NimBLEDevice::createServer();
+#if NIMBLE_CPP_VERSION >= NIMBLE_CPP_VERSION_VAL(3, 0, 0)
+  server->setCallbacks(serverCallbacks);
+#else
   server->setCallbacks(&serverCallbacks, false);
+#endif
 
   NimBLEService* service = server->createService(SERVICE_UUID);
 
@@ -1617,7 +1775,11 @@ void startBLE() {
   NimBLECharacteristic* rx = service->createCharacteristic(
     RX_UUID, NIMBLE_PROPERTY::WRITE
   );
-  rx->setCallbacks(&rxCallbacks);
+#if NIMBLE_CPP_VERSION >= NIMBLE_CPP_VERSION_VAL(3, 0, 0)
+  rx->setCallbacks(rxCallbacks);
+#else
+  rx->setCallbacks(&rxCallbacks, false);
+#endif
 
   service->start();
 
@@ -1629,13 +1791,14 @@ void startBLE() {
 
 void setup() {
   Serial.begin(115200);
+  pushQueueMutex = xSemaphoreCreateMutex();
 
   // O projeto usa somente BLE. Liberar a memoria reservada ao Bluetooth
   // Classic aumenta a heap disponivel para o handshake TLS do FCM/OAuth.
   esp_err_t btMemory = esp_bt_mem_release(ESP_BT_MODE_CLASSIC_BT);
-  Serial.printf("BT Classic: memoria %s; heap=%u\n",
+  Serial.printf("BT Classic: memoria %s; heap=%lu\n",
                 btMemory == ESP_OK ? "liberada" : "ja liberada/indisponivel",
-                ESP.getFreeHeap());
+                (unsigned long)ESP.getFreeHeap());
 
   for (uint8_t i = 0; i < 4; i++) {
     pinMode(MOTOR_PINS[i], OUTPUT);
@@ -1674,9 +1837,16 @@ void setup() {
     lastWiFiAttempt = 0;
     connectWiFiIfNeeded();
   }
+  if (xTaskCreatePinnedToCore(pushWorkerTask, "pushWorker", 16 * 1024,
+                              nullptr, 0, &pushWorkerHandle, 1) != pdPASS) {
+    pushWorkerHandle = nullptr;
+    Serial.println("Push worker indisponivel; processamento fica no loop principal.");
+  }
 }
 
 void loop() {
+  // Feeding has priority over maintenance work. Drain incoming commands and
+  // evaluate scheduled slots before Wi-Fi, temperature, push, or FCM tasks.
   processSerialCommands();
 
   char localCommand[192];
@@ -1691,17 +1861,31 @@ void loop() {
   }
   portEXIT_CRITICAL(&commandMux);
 
+  if (hasCommand && pushNetworkBusy && isFirebaseConfigCommand(localCommand)) {
+    portENTER_CRITICAL(&commandMux);
+    if (!commandPending) {
+      strncpy(pendingCommand, localCommand, sizeof(pendingCommand));
+      pendingCommand[sizeof(pendingCommand) - 1] = '\0';
+      commandPending = true;
+      hasCommand = false;
+    }
+    portEXIT_CRITICAL(&commandMux);
+  }
+
   if (hasCommand) handleCommand(String(localCommand));
+
+  // Keep scheduled feeding ahead of loop maintenance. Push networking runs in
+  // a lower-priority worker, so it cannot block manual or scheduled commands.
+  processSchedule();
 
   connectWiFiIfNeeded();
   processTemperature();
   processEmptyLoadReminder();
-  processPush();
-  processFcmMaintenance();
-
-  if (millis() - lastStatusCheck >= 1000) {
-    lastStatusCheck = millis();
-    processSchedule();
+  if (!pushWorkerHandle) {
+    pushNetworkBusy = true;
+    processPush();
+    processFcmMaintenance();
+    pushNetworkBusy = false;
   }
 
   delay(10);

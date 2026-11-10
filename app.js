@@ -8,6 +8,7 @@ const BLE = {
 const $ = (id) => document.getElementById(id)
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
+const BLE_COMMAND_TIMEOUT_MS = 15000
 
 const firmwareFieldIds = [
 	'ssid', 'feed1', 'feed2', 'firebaseProjectId', 'firebaseClientEmail',
@@ -30,6 +31,7 @@ let connectionMode = null
 let serialReadBuffer = ''
 let toastTimer = null
 let connectionInProgress = false
+let firebaseConfigFieldsEdited = false
 let commandWriteQueue = Promise.resolve()
 let rxFragments = ''
 let statusRefreshTimer = null
@@ -39,6 +41,8 @@ let receivingFeedHistory = false
 let feedHistoryEpochs = []
 let firebaseSetupAlertShown = false
 const bleResponseWaiters = []
+const displayedFirmwareLogKeys = new Set()
+let activityLogSequence = 0
 
 function isConnected() {
 	return Boolean(device?.gatt?.connected || serialConnected)
@@ -54,13 +58,22 @@ function updateFeedButtonAvailability() {
 	button.disabled = !isConnected() || !feedReferenceReady || remaining <= 0 || button.classList.contains('is-loading')
 }
 
-function log(message, kind = 'info') {
+function log(message, kind = 'info', occurredAt) {
 	const logBox = $('log')
 	const empty = logBox.querySelector('.log-empty')
 	if (empty) empty.remove()
 	const row = document.createElement('div')
 	row.className = 'log-entry'
-	const time = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+	const eventTimestamp = occurredAt === undefined
+		? Date.now()
+		: occurredAt instanceof Date ? occurredAt.getTime() : null
+	row.dataset.eventTimestamp = eventTimestamp === null ? '' : String(eventTimestamp)
+	row.dataset.sequence = String(++activityLogSequence)
+	const time = occurredAt === undefined
+		? new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+		: occurredAt instanceof Date
+			? occurredAt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+			: '—'
 	const stamp = document.createElement('span')
 	stamp.className = 'time'
 	stamp.textContent = time
@@ -69,8 +82,14 @@ function log(message, kind = 'info') {
 	if (kind === 'error') content.style.color = '#ff9299'
 	if (kind === 'success') content.style.color = '#00ffb9'
 	row.append(stamp, content)
-	logBox.prepend(row)
-	while (logBox.children.length > 40) logBox.lastElementChild.remove()
+	const rows = [...logBox.querySelectorAll('.log-entry'), row].sort((a, b) => {
+		const timeA = Number(a.dataset.eventTimestamp) || 0
+		const timeB = Number(b.dataset.eventTimestamp) || 0
+		if (timeA !== timeB) return timeB - timeA
+		return Number(b.dataset.sequence) - Number(a.dataset.sequence)
+	})
+	rows.forEach(entry => logBox.append(entry))
+	while (logBox.children.length > 100) logBox.lastElementChild.remove()
 }
 
 function toast(message) {
@@ -107,13 +126,13 @@ function alertIfFirebaseSetupIncomplete(deviceFirebaseState) {
 
 $('firebaseSetupDismiss').addEventListener('click', () => $('firebaseSetupDialog').close())
 
-function waitForBleResponse(predicate, timeoutMs = 3000) {
+function waitForBleResponse(predicate, timeoutMs = 5000, commandLabel = '') {
 	return new Promise((resolve, reject) => {
 		const waiter = { predicate, resolve, reject, timer: null }
 		waiter.timer = setTimeout(() => {
 			const index = bleResponseWaiters.indexOf(waiter)
 			if (index >= 0) bleResponseWaiters.splice(index, 1)
-			reject(new Error('Tempo esgotado aguardando resposta do ESP32.'))
+			reject(new Error(`Tempo esgotado aguardando resposta do ESP32${commandLabel ? ` ao processar ${commandLabel}` : ''}.`))
 		}, timeoutMs)
 		bleResponseWaiters.push(waiter)
 	})
@@ -130,8 +149,9 @@ function resolveBleResponse(message) {
 	}
 }
 
-async function sendCommandAndWait(command, predicate, timeoutMs = 3000) {
-	const responsePromise = waitForBleResponse(predicate, timeoutMs)
+async function sendCommandAndWait(command, predicate, timeoutMs = 5000) {
+	const commandLabel = command.includes('=') ? command.slice(0, command.indexOf('=')) : command
+	const responsePromise = waitForBleResponse(predicate, timeoutMs, commandLabel)
 	await sendCommand(command)
 	const response = await responsePromise
 	if (response.startsWith('ERRO:')) throw new Error(`ESP32: ${response}`)
@@ -175,6 +195,8 @@ function setConnected(connected, name = 'BettaFeeder') {
 	$('statusButton').disabled = !connected
 	updateFeedButtonAvailability()
 	$('homeButton').disabled = !connected
+	$('motorLeftButton').disabled = !connected
+	$('motorRightButton').disabled = !connected
 	$('reloadButton').disabled = true // enabled only after STATUS reports aguardando_recarga
 	$('feed1').disabled = !connected || !feedTimesReceived
 	$('feed2').disabled = !connected || !feedTimesReceived
@@ -232,11 +254,12 @@ function renderFeedHistory() {
 		position_unknown: 'Posição inicial não definida',
 		batch_empty: 'Lote vazio; recarga necessária',
 		position_mismatch: 'Posição do rotor inconsistente',
-		time_unavailable: 'Horário não sincronizado; agendamento suspenso',
 		movement_interrupted: 'Movimento interrompido; verifique possível travamento ou perda de energia',
 		schedule_too_late: 'Horário perdido: atraso acima de 30 minutos'
 	}
-	const ordered = [...feedHistoryEpochs].reverse()
+	// Legacy firmware recorded each reboot without NTP as a failed portion.
+	// Keep those scheduler events out of the feeding history.
+	const ordered = [...feedHistoryEpochs].reverse().filter(record => record.reason !== 'time_unavailable')
 	$('feedingHistoryEmpty').hidden = ordered.length > 0
 	if (ordered.length === 0) $('feedingHistoryEmpty').textContent = 'Nenhuma alimentação registrada neste lote.'
 	ordered.forEach(record => {
@@ -267,6 +290,8 @@ async function requestFeedingHistory(showHistory = true) {
 }
 
 function parseDeviceMessage(message) {
+	// Push diagnostics are neither PWA activity events nor device history.
+	if (message.startsWith('PUSH:')) return
 	if (message === 'FEEDS_END') {
 		receivingFeedHistory = false
 		renderFeedHistory()
@@ -287,15 +312,23 @@ function parseDeviceMessage(message) {
 	if (message.startsWith('LOG:')) {
 		const match = message.match(/^LOG:(\d+):(.*)$/)
 		if (match) {
+			const key = `${match[1]}:${match[2]}`
+			if (displayedFirmwareLogKeys.has(key)) return
+			displayedFirmwareLogKeys.add(key)
+			if (displayedFirmwareLogKeys.size > 256) {
+				displayedFirmwareLogKeys.delete(displayedFirmwareLogKeys.values().next().value)
+			}
 			const epoch = Number(match[1])
-			const time = epoch ? new Date(epoch * 1000).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'medium' }) : 'sem horario NTP'
-			log(`[Histórico ${time}] ${match[2]}`)
+			log(match[2], 'info', epoch ? new Date(epoch * 1000) : null)
 		}
 		return
 	}
 	if (message === 'LOGS_BEGIN' || message === 'LOGS_DONE') {
 		if (message === 'LOGS_BEGIN') log('Histórico salvo no ESP32:')
-		else log('Fim do histórico salvo no ESP32.', 'success')
+		else {
+			log('Fim do histórico salvo no ESP32.', 'success')
+			resolveBleResponse(message)
+		}
 		return
 	}
 	log(`ESP32: ${message}`, 'success')
@@ -352,10 +385,10 @@ function parseDeviceMessage(message) {
 			? 'Credenciais FCM configuradas no ESP32.'
 			: 'Credenciais FCM ainda não configuradas no ESP32.'
 	}
-	if (Object.hasOwn(fields, 'fb_project')) {
+	if (!firebaseConfigFieldsEdited && Object.hasOwn(fields, 'fb_project')) {
 		$('firebaseProjectId').value = fields.fb_project
 	}
-	if (Object.hasOwn(fields, 'fb_email')) {
+	if (!firebaseConfigFieldsEdited && Object.hasOwn(fields, 'fb_email')) {
 		$('firebaseClientEmail').value = fields.fb_email
 	}
 	if (Object.hasOwn(fields, 'ssid')) $('ssid').value = fields.ssid
@@ -424,8 +457,8 @@ async function connect() {
 		log('Bluetooth conectado e notificações ativadas.', 'success')
 		toast('Conectado ao BettaFeeder')
 		connectionStage = 'envio do STATUS'
-		await sendCommand('STATUS')
-		await sendCommand('LOGS', true)
+		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
+		await sendCommandAndWait('LOGS', message => message === 'LOGS_DONE', 15000)
 		void syncPushAuthorization()
 	} catch (error) {
 		const shouldDisconnect = Boolean(server?.connected)
@@ -468,9 +501,9 @@ async function attachSerialPort(port, verifyDevice = false) {
 	if (verifyDevice) {
 		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
 	} else {
-		await sendCommand('STATUS')
+		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
 	}
-	await sendCommand('LOGS', true)
+	await sendCommandAndWait('LOGS', message => message === 'LOGS_DONE', 15000)
 	void syncPushAuthorization()
 }
 
@@ -641,6 +674,7 @@ $('firebasePrivateKey').addEventListener('paste', event => {
 	const pastedText = event.clipboardData?.getData('text')
 	if (!pastedText?.includes('\\n')) return
 	event.preventDefault()
+	firebaseConfigFieldsEdited = true
 	const textarea = event.currentTarget
 	textarea.setRangeText(
 		pastedText.replace(/\\n/g, '\n'),
@@ -649,6 +683,10 @@ $('firebasePrivateKey').addEventListener('paste', event => {
 		'end'
 	)
 })
+
+for (const id of ['firebaseProjectId', 'firebaseClientEmail', 'firebasePrivateKey']) {
+	$(id).addEventListener('input', () => { firebaseConfigFieldsEdited = true })
+}
 
 $('firebaseConfigForm').addEventListener('submit', event => guarded(async () => {
 	event.preventDefault()
@@ -684,28 +722,35 @@ $('firebaseConfigForm').addEventListener('submit', event => guarded(async () => 
 	buttonLabel.textContent = 'Enviando credenciais...'
 	$('firebaseConfigState').textContent = 'Enviando credenciais ao ESP32...'
 	try {
-		await sendCommandAndWait('FB_BEGIN', message => message === 'OK: FB_BEGIN' || message.startsWith('ERRO:'))
+		await sendCommandAndWait('FB_BEGIN', message => message === 'OK: FB_BEGIN' || message.startsWith('ERRO:'), BLE_COMMAND_TIMEOUT_MS)
 		const sendFragmentedField = async (begin, add, save, value) => {
-			await sendCommandAndWait(`${begin}=${value.length}`, message => message === `OK: ${begin}` || message.startsWith('ERRO:'))
+			await sendCommandAndWait(`${begin}=${value.length}`, message => message === `OK: ${begin}` || message.startsWith('ERRO:'), BLE_COMMAND_TIMEOUT_MS)
 			for (let i = 0; i < value.length; i += 12) {
-				await sendCommand(`${add}=${value.slice(i, i + 12)}`, true)
-				await new Promise(resolve => setTimeout(resolve, 100))
+				await sendCommandAndWait(
+					`${add}=${value.slice(i, i + 12)}`,
+					message => message === `OK: ${add}` || message.startsWith('ERRO:'),
+					BLE_COMMAND_TIMEOUT_MS
+				)
 			}
-			await sendCommandAndWait(save, message => message === `OK: ${save}` || message.startsWith('ERRO:'))
+			await sendCommandAndWait(save, message => message === `OK: ${save}` || message.startsWith('ERRO:'), BLE_COMMAND_TIMEOUT_MS)
 		}
 		await sendFragmentedField('PRJ_BEGIN', 'PRJ_ADD', 'PRJ_SAVE', projectId)
 		await sendFragmentedField('EML_BEGIN', 'EML_ADD', 'EML_SAVE', clientEmail)
 		if (privateKey) {
-			await sendCommandAndWait(`PK_BEGIN=${privateKey.length}`, message => message === 'OK: PK_BEGIN' || message.startsWith('ERRO:'))
+			await sendCommandAndWait(`PK_BEGIN=${privateKey.length}`, message => message === 'OK: PK_BEGIN' || message.startsWith('ERRO:'), BLE_COMMAND_TIMEOUT_MS)
 			for (let i = 0; i < privateKey.length; i += 12) {
-				await sendCommand(`PK_ADD=${privateKey.slice(i, i + 12)}`, true)
-				await new Promise(resolve => setTimeout(resolve, 100))
+				await sendCommandAndWait(
+					`PK_ADD=${privateKey.slice(i, i + 12)}`,
+					message => message === 'OK: PK_ADD' || message.startsWith('ERRO:'),
+					BLE_COMMAND_TIMEOUT_MS
+				)
 			}
-			await sendCommandAndWait('PK_SAVE', message => message === 'OK: PK_SAVE' || message.startsWith('ERRO:'))
+			await sendCommandAndWait('PK_SAVE', message => message === 'OK: PK_SAVE' || message.startsWith('ERRO:'), BLE_COMMAND_TIMEOUT_MS)
 		}
-		await sendCommandAndWait('FB_SAVE', message => message === 'OK: credenciais Firebase salvas.' || message.startsWith('ERRO:'))
+		await sendCommandAndWait('FB_SAVE', message => message === 'OK: credenciais Firebase salvas.' || message.startsWith('ERRO:'), BLE_COMMAND_TIMEOUT_MS)
+		firebaseConfigFieldsEdited = false
 		$('firebasePrivateKey').value = ''
-		await sendCommand('STATUS', true)
+		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
 		$('firebaseConfigState').textContent = 'Credenciais FCM salvas no ESP32.'
 		toast('Credenciais Firebase enviadas')
 	} finally {
@@ -746,16 +791,47 @@ $('testFeedButton').addEventListener('click', () => guarded(async () => {
 		updateFeedButtonAvailability()
 	}
 }))
+for (const [buttonId, command] of [['motorLeftButton', 'JOG_LEFT'], ['motorRightButton', 'JOG_RIGHT']]) {
+	$(buttonId).addEventListener('click', () => guarded(async () => {
+		const buttons = [$('motorLeftButton'), $('motorRightButton'), $('homeButton')]
+		buttons.forEach(button => { button.disabled = true })
+		try {
+			const response = await sendCommandAndWait(command, message => message === 'OK: ' + command || message.startsWith('ERRO:') || message.startsWith('BLOQUEADO:'), 15000)
+			if (response !== 'OK: ' + command) throw new Error(`ESP32: ${response}`)
+			feedReferenceReady = false
+			updateFeedButtonAvailability()
+		} finally {
+			buttons.forEach(button => { button.disabled = !isConnected() })
+		}
+	}))
+}
 $('homeButton').addEventListener('click', () => guarded(async () => {
-	if (!await confirmAction('Definir posição inicial', 'Confirma que a cavidade vazia está fisicamente alinhada com a saída?')) return
-	await sendCommand('SET_HOME')
+	if (!await confirmAction('Definir posição inicial', 'Confirma que a cavidade vazia está alinhada com a saída? Isso reinicia a contagem e o histórico do lote; será necessário reabastecer e confirmar a recarga.')) return
+	const response = await sendCommandAndWait('SET_HOME', message => message.startsWith('OK:') || message.startsWith('ERRO:'), 15000)
+	if (!response.startsWith('OK:')) throw new Error(`ESP32: ${response}`)
+	await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
 	await requestFeedingHistory(false)
 }))
 $('reloadButton').addEventListener('click', () => guarded(async () => {
 	if (!await confirmAction('Confirmar recarga', 'Confirma que a recarga foi concluída? O ESP32 vai estacionar o rotor e liberar as próximas alimentações.')) return
-	await sendCommand('RELOAD')
-	await sendCommand('STATUS', true)
-	await requestFeedingHistory(false)
+	const button = $('reloadButton')
+	button.disabled = true
+	button.classList.add('is-loading')
+	button.querySelector('.reload-button-label').textContent = 'Confirmando recarga...'
+	try {
+		await sendCommandAndWait(
+			'RELOAD',
+			message => message === 'OK: recarga confirmada pelo PWA; alimentador pronto.' || message.startsWith('ERRO:'),
+			15000
+		)
+		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
+		await requestFeedingHistory(false)
+		toast('Recarga confirmada no ESP32')
+	} finally {
+		button.classList.remove('is-loading')
+		button.querySelector('.reload-button-label').textContent = 'Confirmar recarga'
+		if (isConnected() && $('batchStatus').textContent.includes('Aguardando recarga')) button.disabled = false
+	}
 }))
 $('clearLogButton').addEventListener('click', () => {
 	$('log').innerHTML = '<div class="log-empty">Os eventos de conexão e configuração aparecerão aqui.</div>'
@@ -926,8 +1002,11 @@ async function removePairedFcmDevice() {
 	)
 	if (beginAck.startsWith('ERRO:')) throw new Error(beginAck)
 	for (let i = 0; i < token.length; i += 12) {
-		await sendCommand(`FCM_REMOVE_ADD=${token.slice(i, i + 12)}`)
-		await new Promise(resolve => setTimeout(resolve, 100))
+			await sendCommandAndWait(
+				`FCM_REMOVE_ADD=${token.slice(i, i + 12)}`,
+				message => message === 'OK: FCM_ADD' || message.startsWith('ERRO:'),
+				BLE_COMMAND_TIMEOUT_MS
+			)
 	}
 	const removeAck = await sendCommandAndWait(
 		'FCM_REMOVE',
@@ -949,16 +1028,21 @@ function pairFcmToken() {
 		const token = currentFcmToken
 		const beginAck = await sendCommandAndWait(
 			`FCM_BEGIN=${token.length}`,
-			message => message === 'OK: FCM_BEGIN' || message.startsWith('ERRO:')
+			message => message === 'OK: FCM_BEGIN' || message.startsWith('ERRO:'),
+			BLE_COMMAND_TIMEOUT_MS
 		)
 		if (beginAck.startsWith('ERRO:')) throw new Error(beginAck)
 		for (let i = 0; i < token.length; i += 12) {
-			await sendCommand(`FCM_ADD=${token.slice(i, i + 12)}`)
-			await new Promise(resolve => setTimeout(resolve, 100))
+			await sendCommandAndWait(
+				`FCM_ADD=${token.slice(i, i + 12)}`,
+				message => message === 'OK: FCM_ADD' || message.startsWith('ERRO:'),
+				BLE_COMMAND_TIMEOUT_MS
+			)
 		}
 		const saveAck = await sendCommandAndWait(
 			'FCM_SAVE',
-			message => message === 'OK: destino FCM salvo' || message.startsWith('ERRO:')
+			message => message === 'OK: destino FCM salvo' || message.startsWith('ERRO:'),
+			BLE_COMMAND_TIMEOUT_MS
 		)
 		if (saveAck.startsWith('ERRO:')) throw new Error(saveAck)
 		$('pushTest').disabled = false
@@ -974,12 +1058,14 @@ function pairFcmToken() {
 }
 
 async function syncPushAuthorization() {
-	if (!isConnected()) return
+	if (!isConnected() || pushTransitioning) return
 	let removalPending = false
 	let hasPairedToken = false
+	let userDisabled = false
 	try {
 		removalPending = localStorage.getItem(fcmRemovalPendingKey) === 'true'
 		hasPairedToken = Boolean(localStorage.getItem(pairedFcmTokenKey))
+		userDisabled = localStorage.getItem(pushDisabledKey) === 'true'
 	} catch (_) { }
 	if (!('Notification' in window) || Notification.permission !== 'granted') {
 		pushActive = false
@@ -989,20 +1075,41 @@ async function syncPushAuthorization() {
 			removalPending = true
 		}
 		if (removalPending) {
+			pushTransitioning = true
+			updatePushControl()
 			try { await removePairedFcmDevice() }
 			catch (error) { log(`Falha ao remover este dispositivo do firmware: ${error?.message || error}`, 'error') }
+			finally { pushTransitioning = false; updatePushControl() }
 		}
 		return
 	}
 	if (removalPending) {
+		pushTransitioning = true
+		updatePushControl()
 		try { await removePairedFcmDevice() }
-		catch (error) { log(`Falha ao remover este dispositivo do firmware: ${error?.message || error}`, 'error'); return }
+		catch (error) {
+			log(`Falha ao remover este dispositivo do firmware: ${error?.message || error}`, 'error')
+			pushTransitioning = false
+			updatePushControl()
+			return
+		}
+		pushTransitioning = false
+		updatePushControl()
 	}
-	if (!pushActive) return
+	if (userDisabled) {
+		pushActive = false
+		updatePushControl()
+		return
+	}
+	pushTransitioning = true
+	updatePushControl()
 	try {
 		await enablePushNotifications()
 	} catch (error) {
 		log(`Falha ao atualizar o push: ${error?.message || error}`, 'error')
+	} finally {
+		pushTransitioning = false
+		updatePushControl()
 	}
 }
 

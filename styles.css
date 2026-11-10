@@ -356,6 +356,17 @@ button.button-primary:disabled.is-loading .connect-spinner {
 	border: 1px solid #3b4149
 }
 
+.motor-jog-controls {
+	display: inline-flex;
+	gap: 8px
+}
+
+.motor-jog-button {
+	min-width: 48px;
+	font-size: 22px;
+	line-height: 1
+}
+
 .button-danger {
 	background: rgba(255, 89, 100, .12);
 	border: 1px solid rgba(255, 89, 100, .3);
@@ -609,9 +620,20 @@ textarea::placeholder {
 
 .status-actions {
 	display: grid;
-	grid-template-columns: repeat(3, minmax(0, 1fr));
+	grid-template-columns: repeat(2, minmax(0, 1fr));
 	gap: 10px;
 	margin-top: 14px
+}
+
+.motor-alignment-actions {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin-top: 16px
+}
+
+.motor-alignment-actions #homeButton {
+	flex: 1
 }
 
 .small {
@@ -890,6 +912,10 @@ footer {
 
 	.status-actions {
 		grid-template-columns: 1fr
+	}
+
+	.motor-alignment-actions {
+		align-items: stretch
 	}
 
 	footer {
