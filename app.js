@@ -94,7 +94,7 @@ function updateMotorTestControls() {
 	else if (motorTestActive) $('motorTestStatus').textContent = `Ativo · disparo ${Math.min(motorTestShots + 1, 9)}/9 nesta ativacao${nextTime ? ` · proximo: ${nextTime}` : ''}`
 	else if (motorTestShots >= 9) $('motorTestStatus').textContent = 'Concluido. Antes de abastecer racao real, alinhe o rotor e use SET_HOME para zerar a contagem.'
 	else if (motorTestShots > 0) $('motorTestStatus').textContent = 'Cancelado; disparos contam como porcoes. Antes de abastecer, alinhe o rotor e use SET_HOME.'
-	else $('motorTestStatus').textContent = testPortionsAvailable && feedReferenceReady && !reloadWaitingForRefill ? 'Desligado. O primeiro disparo sera no proximo quarto de hora.' : 'Passo 1: alinhe a cavidade vazia com a saída e clique em “Definir posição inicial”. Passo 2: confirme a recarga no PWA para liberar 9 porções lógicas.'
+	else $('motorTestStatus').textContent = testPortionsAvailable && feedReferenceReady && !reloadWaitingForRefill ? 'Desligado. O primeiro disparo será no próximo limite de 5 minutos; depois, serão 3 disparos com intervalo de 5 min, 3 de 10 min e 3 de 15 min.' : 'Passo 1: alinhe a cavidade vazia com a saída e clique em “Definir posição inicial”. Passo 2: confirme a recarga no PWA para liberar 9 porções lógicas.'
 }
 
 function log(message, kind = 'info', occurredAt) {
