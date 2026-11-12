@@ -1,0 +1,54 @@
+{
+	"devices": {
+		"bettafeeder": {
+			"status": {
+				"updatedAt": 1794427200,
+				"wifi": "conectado",
+				"ssid": "MinhaRede",
+				"feed1": "08:00",
+				"feed2": "20:00",
+				"portionsRemaining": 11,
+				"portionsDispensed": 3,
+				"batchState": "pronto",
+				"referenceValid": true,
+				"temperatureC": 26.4,
+				"clockValid": true,
+				"motorTest": false
+			},
+			"feedHistory": [
+				{
+					"timestamp": 1794408000,
+					"success": true,
+					"portion": 1,
+					"reason": "success"
+				},
+				{
+					"timestamp": 1794411600,
+					"success": true,
+					"portion": 2,
+					"reason": "success"
+				},
+				{
+					"timestamp": 1794415200,
+					"success": false,
+					"portion": 3,
+					"reason": "motor_busy"
+				}
+			],
+			"logs": [
+				{
+					"timestamp": 1794400000,
+					"message": "Reinicializacao do ESP32."
+				},
+				{
+					"timestamp": 1794400500,
+					"message": "Relogio sincronizado por NTP."
+				},
+				{
+					"timestamp": 1794415200,
+					"message": "Alimentacao bloqueada: motor ocupado."
+				}
+			]
+		}
+	}
+}

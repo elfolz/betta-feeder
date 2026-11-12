@@ -11,7 +11,7 @@ const decoder = new TextDecoder()
 const BLE_COMMAND_TIMEOUT_MS = 15000
 
 const firmwareFieldIds = [
-	'ssid', 'feed1', 'feed2', 'firebaseProjectId', 'firebaseClientEmail',
+	'ssid', 'feed1', 'feed2', 'firebaseProjectId', 'firebaseDatabaseUrl', 'firebaseClientEmail',
 	'wifiStatus', 'clockStatus', 'portionsStatus', 'temperatureStatus',
 	'batchStatus', 'pushState', 'firebaseConfigState'
 ]
@@ -32,6 +32,11 @@ let serialReadBuffer = ''
 let toastTimer = null
 let connectionInProgress = false
 let firebaseConfigFieldsEdited = false
+const realtimeDatabaseUrlKey = 'bettafeeder-realtime-database-url'
+let realtimeDatabaseRef = null
+let realtimeDatabaseListener = null
+let realtimeDatabaseLastError = ''
+const displayedRealtimeLogKeys = new Set()
 let commandWriteQueue = Promise.resolve()
 let rxFragments = ''
 let statusRefreshTimer = null
@@ -259,6 +264,7 @@ function setConnected(connected, name = 'BettaFeeder') {
 	$('togglePassword').disabled = !connected
 	$('pushTest').disabled = !connected
 	$('firebaseProjectId').disabled = !connected
+	$('firebaseDatabaseUrl').disabled = !connected
 	$('firebaseClientEmail').disabled = !connected
 	$('firebasePrivateKey').disabled = !connected
 	$('saveFirebaseConfigButton').disabled = !connected || $('saveFirebaseConfigButton').classList.contains('is-loading')
@@ -501,12 +507,17 @@ function parseDeviceMessage(message) {
 		$('pushState').textContent = 'Destino no ESP32: ' + (pushLabels[fields.push] || 'Estado desconhecido')
 	}
 	if (fields.firebase) {
-		$('firebaseConfigState').textContent = fields.firebase === 'configurado'
-			? 'Credenciais FCM configuradas no ESP32.'
-			: 'Credenciais FCM ainda não configuradas no ESP32.'
+		const fcmStatus = fields.firebase === 'configurado' ? 'FCM configurado' : 'FCM não configurado'
+		const databaseStatus = fields.rtdb === 'configurado' ? 'Realtime Database configurado' : 'Realtime Database pendente'
+		$('firebaseConfigState').textContent = `${fcmStatus} · ${databaseStatus}.`
 	}
 	if (!firebaseConfigFieldsEdited && Object.hasOwn(fields, 'fb_project')) {
 		$('firebaseProjectId').value = fields.fb_project
+	}
+	if (!firebaseConfigFieldsEdited && Object.hasOwn(fields, 'fb_rtdb')) $('firebaseDatabaseUrl').value = fields.fb_rtdb
+	if (fields.fb_rtdb) {
+		try { localStorage.setItem(realtimeDatabaseUrlKey, fields.fb_rtdb) } catch (_) { }
+		startRealtimeDatabaseListener(fields.fb_rtdb)
 	}
 	if (!firebaseConfigFieldsEdited && Object.hasOwn(fields, 'fb_email')) {
 		$('firebaseClientEmail').value = fields.fb_email
@@ -835,13 +846,14 @@ $('firebasePrivateKey').addEventListener('paste', event => {
 	)
 })
 
-for (const id of ['firebaseProjectId', 'firebaseClientEmail', 'firebasePrivateKey']) {
+for (const id of ['firebaseProjectId', 'firebaseDatabaseUrl', 'firebaseClientEmail', 'firebasePrivateKey']) {
 	$(id).addEventListener('input', () => { firebaseConfigFieldsEdited = true })
 }
 
 $('firebaseConfigForm').addEventListener('submit', event => guarded(async () => {
 	event.preventDefault()
 	const projectId = $('firebaseProjectId').value.trim()
+	const databaseUrl = $('firebaseDatabaseUrl').value.trim().replace(/\/$/, '')
 	const clientEmail = $('firebaseClientEmail').value.trim()
 	const privateKeyInput = $('firebasePrivateKey').value.trim()
 	if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(projectId)) {
@@ -849,6 +861,13 @@ $('firebaseConfigForm').addEventListener('submit', event => guarded(async () => 
 	}
 	if (!clientEmail.endsWith('.iam.gserviceaccount.com')) {
 		throw new Error('Informe o e-mail de uma conta de serviço Firebase.')
+	}
+	let parsedDatabaseUrl
+	try { parsedDatabaseUrl = new URL(databaseUrl) } catch (_) { throw new Error('Informe a URL HTTPS do Realtime Database.') }
+	if (parsedDatabaseUrl.protocol !== 'https:' || parsedDatabaseUrl.username || parsedDatabaseUrl.password ||
+		parsedDatabaseUrl.pathname !== '/' || parsedDatabaseUrl.search || parsedDatabaseUrl.hash ||
+		!/^[a-z0-9-]+\.(?:firebaseio\.com|firebasedatabase\.app)$/.test(parsedDatabaseUrl.hostname)) {
+		throw new Error('Informe a URL base HTTPS do Firebase Realtime Database, sem caminho adicional.')
 	}
 	let privateKey = ''
 	if (privateKeyInput) {
@@ -886,6 +905,7 @@ $('firebaseConfigForm').addEventListener('submit', event => guarded(async () => 
 			await sendCommandAndWait(save, message => message === `OK: ${save}` || message.startsWith('ERRO:'), BLE_COMMAND_TIMEOUT_MS)
 		}
 		await sendFragmentedField('PRJ_BEGIN', 'PRJ_ADD', 'PRJ_SAVE', projectId)
+		await sendFragmentedField('DB_BEGIN', 'DB_ADD', 'DB_SAVE', databaseUrl)
 		await sendFragmentedField('EML_BEGIN', 'EML_ADD', 'EML_SAVE', clientEmail)
 		if (privateKey) {
 			await sendCommandAndWait(`PK_BEGIN=${privateKey.length}`, message => message === 'OK: PK_BEGIN' || message.startsWith('ERRO:'), BLE_COMMAND_TIMEOUT_MS)
@@ -900,9 +920,10 @@ $('firebaseConfigForm').addEventListener('submit', event => guarded(async () => 
 		}
 		await sendCommandAndWait('FB_SAVE', message => message === 'OK: credenciais Firebase salvas.' || message.startsWith('ERRO:'), BLE_COMMAND_TIMEOUT_MS)
 		firebaseConfigFieldsEdited = false
+		try { localStorage.setItem(realtimeDatabaseUrlKey, databaseUrl) } catch (_) { }
 		$('firebasePrivateKey').value = ''
 		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
-		$('firebaseConfigState').textContent = 'Credenciais FCM salvas no ESP32.'
+		$('firebaseConfigState').textContent = 'Configuração Firebase e URL do Realtime Database salvas no ESP32.'
 		toast('Credenciais Firebase enviadas')
 	} finally {
 		button.classList.remove('is-loading')
@@ -1031,6 +1052,14 @@ if ('serviceWorker' in navigator && window.isSecureContext) {
 }
 
 window.addEventListener('load', () => {
+	let savedDatabaseUrl = window.BETTA_FIREBASE_CONFIG?.databaseURL || ''
+	try { savedDatabaseUrl ||= localStorage.getItem(realtimeDatabaseUrlKey) || '' } catch (_) { }
+	if (window.BETTA_FIREBASE_CONFIG?.projectId) $('firebaseProjectId').value = window.BETTA_FIREBASE_CONFIG.projectId
+	if (savedDatabaseUrl) {
+		$('firebaseDatabaseUrl').value = savedDatabaseUrl
+		startRealtimeDatabaseListener(savedDatabaseUrl)
+	}
+	else $('cloudDataStatus').textContent = 'Conecte ao alimentador uma vez para carregar a URL do banco e sincronizar os dados.'
 	if ('serial' in navigator) {
 		void reconnectAuthorizedSerial()
 		navigator.serial.addEventListener('connect', () => { void reconnectAuthorizedSerial() })
@@ -1059,6 +1088,103 @@ function firebaseWebConfigured() {
 	return config && config.apiKey && config.apiKey !== 'COLOQUE_WEB_API_KEY' &&
 		config.vapidKey && config.vapidKey !== 'COLOQUE_VAPID_PUBLICA' &&
 		config.messagingSenderId && config.messagingSenderId !== 'COLOQUE_MESSAGING_SENDER_ID'
+}
+
+function isValidRealtimeDatabaseUrl(value) {
+	try {
+		const url = new URL(value)
+		return url.protocol === 'https:' && !url.username && !url.password && url.pathname === '/' && !url.search && !url.hash &&
+			/^[a-z0-9-]+\.(?:firebaseio\.com|firebasedatabase\.app)$/.test(url.hostname)
+	} catch (_) { return false }
+}
+
+function startRealtimeDatabaseListener(databaseUrl) {
+	if (!isValidRealtimeDatabaseUrl(databaseUrl)) {
+		$('cloudDataStatus').textContent = 'A URL do Realtime Database está ausente ou inválida.'
+		return
+	}
+	if (!window.firebase?.database) {
+		$('cloudDataStatus').textContent = 'O SDK do Realtime Database não carregou.'
+		return
+	}
+	if (realtimeDatabaseRef && realtimeDatabaseRef.toString().startsWith(databaseUrl)) return
+	if (realtimeDatabaseRef && realtimeDatabaseListener) realtimeDatabaseRef.off('value', realtimeDatabaseListener)
+	const appName = `BettaFeederRTDB_${new URL(databaseUrl).hostname.replace(/[^a-zA-Z0-9]/g, '_')}`
+	let databaseApp = firebase.apps.find(app => app.name === appName)
+	if (!databaseApp) {
+		const config = { ...window.BETTA_FIREBASE_CONFIG, databaseURL: databaseUrl }
+		databaseApp = firebase.initializeApp(config, appName)
+	}
+	const reference = firebase.database(databaseApp).ref('devices/bettafeeder')
+	const listener = snapshot => {
+		const deviceData = snapshot.val()
+		if (!deviceData) {
+			$('cloudDataStatus').textContent = 'Ainda não há dados do alimentador no Realtime Database.'
+			return
+		}
+		applyRealtimeDatabaseData(deviceData)
+	}
+	realtimeDatabaseRef = reference
+	realtimeDatabaseListener = listener
+	realtimeDatabaseLastError = ''
+	reference.on('value', listener, error => {
+		const permissionDenied = error?.code === 'PERMISSION_DENIED'
+		$('cloudDataStatus').textContent = permissionDenied
+			? 'Sem permissão de leitura no Realtime Database. Revise as regras do banco.'
+			: `Falha ao ler o Realtime Database: ${error?.message || error}`
+		if (realtimeDatabaseLastError !== error?.code) log($('cloudDataStatus').textContent, 'error')
+		realtimeDatabaseLastError = error?.code || 'unknown'
+	})
+}
+
+function applyRealtimeDatabaseData(data) {
+	const status = data.status || {}
+	if (status.wifi) $('wifiStatus').textContent = status.wifi === 'conectado' ? 'Conectado' : 'Desconectado'
+	if (status.ssid !== undefined) $('ssid').value = status.ssid || ''
+	if (status.feed1) $('feed1').value = status.feed1
+	if (status.feed2) $('feed2').value = status.feed2
+	feedTimesReceived = Boolean(status.feed1 && status.feed2)
+	const remaining = Number(status.portionsRemaining)
+	if (Number.isFinite(remaining)) $('portionsStatus').textContent = String(remaining)
+	if (status.temperatureC === null || status.temperatureC === undefined) {
+		$('temperatureStatus').textContent = 'Indisponível'
+		$('temperatureStatus').classList.remove('temperature-low')
+	} else {
+		const temperature = Number(status.temperatureC)
+		$('temperatureStatus').textContent = `${temperature.toFixed(1).replace('.', ',')} °C`
+		$('temperatureStatus').classList.toggle('temperature-low', temperature < 24 || temperature > 28)
+	}
+	const updatedAt = Number(status.updatedAt)
+	if (Number.isFinite(updatedAt) && updatedAt > 0) {
+		const when = new Date(updatedAt * 1000)
+		$('clockStatus').textContent = when.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'medium' })
+	}
+	const refLabel = status.referenceValid ? 'Confirmada' : 'Precisa ser definida'
+	const batchLabel = status.batchState === 'aguardando_recarga' ? 'Aguardando recarga' : 'Pronto'
+	$('batchStatus').textContent = `Referência: ${refLabel} · Lote: ${batchLabel}`
+	feedReferenceReady = Boolean(status.referenceValid)
+	motorTestActive = Boolean(status.motorTest)
+	updateFeedButtonAvailability()
+	updateMotorTestControls()
+	if (Array.isArray(data.feedHistory)) {
+		feedHistoryEpochs = data.feedHistory.filter(record => record && Number.isFinite(Number(record.timestamp)))
+			.map(record => ({ epoch: Number(record.timestamp), success: Boolean(record.success), portion: Number(record.portion) || 0, reason: String(record.reason || '') }))
+		renderFeedHistory()
+	}
+	if (Array.isArray(data.logs)) {
+		for (const record of data.logs) {
+			if (!record || typeof record.message !== 'string') continue
+			const key = `${record.timestamp || 0}:${record.message}`
+			if (displayedRealtimeLogKeys.has(key)) continue
+			displayedRealtimeLogKeys.add(key)
+			if (displayedRealtimeLogKeys.size > 256) displayedRealtimeLogKeys.delete(displayedRealtimeLogKeys.values().next().value)
+			const epoch = Number(record.timestamp)
+			log(record.message, /teste do motor|teste motor/i.test(record.message) ? 'test' : 'info', epoch ? new Date(epoch * 1000) : null)
+		}
+	}
+	$('cloudDataStatus').textContent = Number.isFinite(updatedAt) && updatedAt > 0
+		? `Dados do Firebase atualizados em ${new Date(updatedAt * 1000).toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' })}.`
+		: 'Dados recebidos do Firebase.'
 }
 
 async function enablePushNotifications() {

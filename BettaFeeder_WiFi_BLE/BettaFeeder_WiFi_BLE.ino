@@ -162,17 +162,21 @@ String pendingFcmToken;
 bool pendingFcmRemoval = false;
 size_t expectedFcmLength = 0;
 String firebaseProjectId;
+String firebaseDatabaseUrl;
 String firebaseClientEmail;
 String firebasePrivateKey;
 String pendingFirebaseProjectId;
+String pendingFirebaseDatabaseUrl;
 String pendingFirebaseClientEmail;
 String pendingFirebasePrivateKey;
 size_t expectedFirebaseProjectLength = 0;
+size_t expectedFirebaseDatabaseLength = 0;
 size_t expectedFirebaseEmailLength = 0;
 size_t expectedFirebasePrivateKeyLength = 0;
 bool firebaseConfigEditing = false;
 String oauthAccessToken;
 unsigned long oauthExpiresAtMs = 0;
+unsigned long nextRealtimeUploadAt = 0;
 String pendingPushEvent;
 String pendingPushText;
 struct QueuedPush {
@@ -364,6 +368,7 @@ void notifyPushLog(const String& message) {
 void saveSettings() {
   // Token de notificacao fica no NVS, nunca em logs BLE.
   prefs.putString("ssid", wifiSSID);
+  prefs.putString("fbRtdb", firebaseDatabaseUrl);
   prefs.putString("pass", wifiPASS);
   prefs.putUShort("feed1", feedMinute[0]);
   prefs.putUShort("feed2", feedMinute[1]);
@@ -454,6 +459,7 @@ void loadSettings() {
     if (!legacyToken.isEmpty()) { fcmTargetTokens[0] = legacyToken; fcmTargetCount = 1; saveFcmDevices(); }
   }
   firebaseProjectId = prefs.getString("fbProject", "");
+  firebaseDatabaseUrl = prefs.getString("fbRtdb", "");
   firebaseClientEmail = prefs.getString("fbEmail", "");
   firebasePrivateKey = "";
   size_t savedKeyLength = prefs.getBytesLength("fbKeyBin");
@@ -627,7 +633,7 @@ String signedJwt() {
   time_t now = time(nullptr);
   String header = "{\"alg\":\"RS256\",\"typ\":\"JWT\"}";
   String claims = "{\"iss\":\"" + jsonEscape(firebaseClientEmail) +
-    "\",\"scope\":\"https://www.googleapis.com/auth/firebase.messaging\",\"aud\":\"https://oauth2.googleapis.com/token\",\"iat\":" +
+    "\",\"scope\":\"https://www.googleapis.com/auth/firebase.messaging https://www.googleapis.com/auth/firebase.database\",\"aud\":\"https://oauth2.googleapis.com/token\",\"iat\":" +
     String((uint32_t)now) + ",\"exp\":" + String((uint32_t)(now + 3500)) + "}";
   String input = b64urlText(header) + "." + b64urlText(claims);
   if (input.length() < 10) return "";
@@ -784,6 +790,100 @@ String oauthToken() {
   notifyPushLog(oauthAccessToken.isEmpty() ? "OAuth: resposta sem access_token" : "OAuth: access token obtido");
   return oauthAccessToken;
 }
+
+bool realtimeDatabaseConfigured() {
+  return firebaseConfigured() && firebaseDatabaseUrl.startsWith("https://");
+}
+
+bool realtimeDatabasePut(const String& path, const String& json) {
+  if (!realtimeDatabaseConfigured() || WiFi.status() != WL_CONNECTED || !clockIsValid()) return false;
+  String token = oauthToken();
+  if (token.isEmpty()) return false;
+  String url = firebaseDatabaseUrl + "/devices/bettafeeder/" + path + ".json?access_token=" + token;
+  WiFiClientSecure secure;
+  configureTlsClient(secure);
+  HTTPClient http;
+  http.setTimeout(12000);
+  if (!http.begin(secure, url)) return false;
+  http.addHeader("Content-Type", "application/json; charset=utf-8");
+  int code = http.PUT(json);
+  String response = code > 0 ? http.getString() : "";
+  http.end();
+  if (code == 401) { oauthAccessToken = ""; oauthExpiresAtMs = 0; }
+  if (code != 200) {
+    notifyPushLog(String("Realtime Database ") + path + " HTTP " + code);
+    if (!response.isEmpty()) {
+      if (response.length() > 120) response = response.substring(0, 120);
+      notifyPushLog(String("Realtime Database erro: ") + response);
+    }
+  }
+  return code == 200;
+}
+
+String realtimeStatusJson() {
+  time_t now = time(nullptr);
+  uint8_t remaining = awaitingReload || portionsDispensed >= PORTIONS_PER_LOAD
+    ? 0 : PORTIONS_PER_LOAD - portionsDispensed;
+  String json = "{\"updatedAt\":" + String((uint32_t)now) +
+    ",\"wifi\":\"" + String(WiFi.status() == WL_CONNECTED ? "conectado" : "desconectado") +
+    "\",\"ssid\":\"" + jsonEscape(wifiSSID) +
+    "\",\"feed1\":\"" + formatHHMM(feedMinute[0]) +
+    "\",\"feed2\":\"" + formatHHMM(feedMinute[1]) +
+    "\",\"portionsRemaining\":" + String(remaining) +
+    ",\"portionsDispensed\":" + String(portionsDispensed) +
+    ",\"batchState\":\"" + String(awaitingReload ? "aguardando_recarga" : "pronto") +
+    "\",\"referenceValid\":" + String(referenceValid ? "true" : "false") +
+    ",\"temperatureC\":";
+  if (waterTemperatureC != DEVICE_DISCONNECTED_C && isfinite(waterTemperatureC)) json += String(waterTemperatureC, 1);
+  else json += "null";
+  json += ",\"clockValid\":" + String(clockIsValid() ? "true" : "false") +
+    ",\"motorTest\":" + String(motorTestMode ? "true" : "false") + "}";
+  return json;
+}
+
+String realtimeLogsJson() {
+  String json = "[";
+  uint8_t first = (deviceLogNext + DEVICE_LOG_CAPACITY - deviceLogCount) % DEVICE_LOG_CAPACITY;
+  bool comma = false;
+  for (uint8_t i = 0; i < deviceLogCount; i++) {
+    DeviceLogRecord record{};
+    uint8_t slot = (first + i) % DEVICE_LOG_CAPACITY;
+    if (prefs.getBytes(deviceLogKey(slot).c_str(), &record, sizeof(record)) != sizeof(record)) continue;
+    if (strncmp(record.message, "Push:", 5) == 0) continue;
+    if (comma) json += ",";
+    comma = true;
+    json += "{\"timestamp\":" + String(record.epoch) + ",\"message\":\"" + jsonEscape(String(record.message)) + "\"}";
+  }
+  json += "]";
+  return json;
+}
+
+String realtimeFeedHistoryJson() {
+  String json = "[";
+  uint8_t first = (feedHistoryNext + FEED_HISTORY_CAPACITY - feedHistoryCount) % FEED_HISTORY_CAPACITY;
+  bool comma = false;
+  for (uint8_t i = 0; i < feedHistoryCount; i++) {
+    const FeedHistoryRecord& record = feedHistory[(first + i) % FEED_HISTORY_CAPACITY];
+    if (!isValidFeedHistoryRecord(record)) continue;
+    if (comma) json += ",";
+    comma = true;
+    json += "{\"timestamp\":" + String(record.epoch) + ",\"success\":" + String(record.success ? "true" : "false") +
+      ",\"portion\":" + String(record.portion) + ",\"reason\":\"" + jsonEscape(String(record.reason)) + "\"}";
+  }
+  json += "]";
+  return json;
+}
+
+void processRealtimeDatabase() {
+  if (!realtimeDatabaseConfigured() || WiFi.status() != WL_CONNECTED || !clockIsValid()) return;
+  if (nextRealtimeUploadAt && (int32_t)(millis() - nextRealtimeUploadAt) < 0) return;
+  nextRealtimeUploadAt = millis() + 60000UL;
+  bool statusOk = realtimeDatabasePut("status", realtimeStatusJson());
+  bool feedsOk = realtimeDatabasePut("feedHistory", realtimeFeedHistoryJson());
+  bool logsOk = realtimeDatabasePut("logs", realtimeLogsJson());
+  if (statusOk && feedsOk && logsOk) Serial.println("Realtime Database: estado, alimentacoes e logs sincronizados");
+}
+
 bool deliverPushToToken(const String& title, const String& body, const String& targetToken,
                         bool& tokenInvalid, bool validateOnly = false) {
   tokenInvalid = false;
@@ -1398,6 +1498,8 @@ void sendStatus() {
   s += ";push=" + String(hasFcmDevices() ? "configurado" : "sem_destino");
   s += ";firebase=" + String(firebaseConfigured() ? "configurado" : "incompleto");
   s += ";fb_project=" + firebaseProjectId;
+  s += ";fb_rtdb=" + firebaseDatabaseUrl;
+  s += ";rtdb=" + String(realtimeDatabaseConfigured() ? "configurado" : "incompleto");
   s += ";fb_email=" + firebaseClientEmail;
   s += ";temperatura=";
   if (waterTemperatureC != DEVICE_DISCONNECTED_C && isfinite(waterTemperatureC)) {
@@ -1636,9 +1738,11 @@ void handleCommand(String cmd) {
     notifyBLE("OK: recarga confirmada pelo PWA; alimentador pronto.");
   } else if (key == "FB_BEGIN") {
     pendingFirebaseProjectId = firebaseProjectId;
+    pendingFirebaseDatabaseUrl = firebaseDatabaseUrl;
     pendingFirebaseClientEmail = firebaseClientEmail;
     pendingFirebasePrivateKey = firebasePrivateKey;
     expectedFirebaseProjectLength = 0;
+    expectedFirebaseDatabaseLength = 0;
     expectedFirebaseEmailLength = 0;
     expectedFirebasePrivateKeyLength = 0;
     firebaseConfigEditing = true;
@@ -1682,6 +1786,35 @@ void handleCommand(String cmd) {
     }
     expectedFirebaseProjectLength = 0;
     notifyBLE("OK: PRJ_SAVE");
+  } else if (key == "DB_BEGIN") {
+    const long fieldLength = value.toInt();
+    if (!firebaseConfigEditing || fieldLength < 30 || fieldLength > 160) {
+      notifyBLE("ERRO: tamanho da URL Realtime Database invalido.");
+      return;
+    }
+    expectedFirebaseDatabaseLength = (size_t)fieldLength;
+    pendingFirebaseDatabaseUrl = "";
+    pendingFirebaseDatabaseUrl.reserve(expectedFirebaseDatabaseLength + 1);
+    notifyBLE("OK: DB_BEGIN");
+  } else if (key == "DB_ADD") {
+    if (!firebaseConfigEditing || expectedFirebaseDatabaseLength == 0 || value.isEmpty() ||
+        pendingFirebaseDatabaseUrl.length() + value.length() > expectedFirebaseDatabaseLength) {
+      notifyBLE("ERRO: fragmento da URL Realtime Database invalido.");
+      return;
+    }
+    pendingFirebaseDatabaseUrl += value;
+    notifyBLE("OK: DB_ADD");
+  } else if (key == "DB_SAVE") {
+    if (!firebaseConfigEditing || expectedFirebaseDatabaseLength == 0 ||
+        pendingFirebaseDatabaseUrl.length() != expectedFirebaseDatabaseLength ||
+        !pendingFirebaseDatabaseUrl.startsWith("https://") ||
+        (pendingFirebaseDatabaseUrl.indexOf("firebaseio.com") < 0 && pendingFirebaseDatabaseUrl.indexOf("firebasedatabase.app") < 0) ||
+        pendingFirebaseDatabaseUrl.indexOf(" ") >= 0 || pendingFirebaseDatabaseUrl.endsWith("/")) {
+      notifyBLE("ERRO: URL HTTPS do Realtime Database invalida.");
+      return;
+    }
+    expectedFirebaseDatabaseLength = 0;
+    notifyBLE("OK: DB_SAVE");
   } else if (key == "EML_BEGIN") {
     const long fieldLength = value.toInt();
     if (!firebaseConfigEditing || fieldLength < 20 || fieldLength > 160) {
@@ -1739,7 +1872,7 @@ void handleCommand(String cmd) {
     expectedFirebasePrivateKeyLength = 0;
     notifyBLE("OK: PK_SAVE");
   } else if (key == "FB_SAVE") {
-    if (!firebaseConfigEditing || pendingFirebaseProjectId.isEmpty() ||
+    if (!firebaseConfigEditing || pendingFirebaseProjectId.isEmpty() || pendingFirebaseDatabaseUrl.isEmpty() ||
         pendingFirebaseClientEmail.isEmpty() ||
         pendingFirebasePrivateKey.indexOf("-----BEGIN PRIVATE KEY-----") < 0 ||
         pendingFirebasePrivateKey.indexOf("-----END PRIVATE KEY-----") < 0) {
@@ -1748,6 +1881,7 @@ void handleCommand(String cmd) {
     }
     size_t freeEntriesBefore = prefs.freeEntries();
     size_t projectWritten = prefs.putString("fbProject", pendingFirebaseProjectId);
+    size_t databaseWritten = prefs.putString("fbRtdb", pendingFirebaseDatabaseUrl);
     size_t emailWritten = prefs.putString("fbEmail", pendingFirebaseClientEmail);
     size_t keySize = pendingFirebasePrivateKey.length() + 1;
     size_t keyWritten = prefs.putBytes("fbKeyBin", pendingFirebasePrivateKey.c_str(), keySize);
@@ -1762,7 +1896,8 @@ void handleCommand(String cmd) {
       free(savedKeyBuffer);
     }
     if (!projectWritten || !emailWritten || !keyWritten ||
-        savedProject != pendingFirebaseProjectId ||
+        savedProject != pendingFirebaseProjectId || databaseWritten != pendingFirebaseDatabaseUrl.length() ||
+        prefs.getString("fbRtdb", "") != pendingFirebaseDatabaseUrl ||
         savedEmail != pendingFirebaseClientEmail ||
         !savedKeyMatches) {
       notifyBLE(String("ERRO: NVS Firebase; gravado=") + projectWritten + "," + emailWritten + "," + keyWritten +
@@ -1773,6 +1908,7 @@ void handleCommand(String cmd) {
     }
     prefs.remove("fbKey");
     firebaseProjectId = pendingFirebaseProjectId;
+    firebaseDatabaseUrl = pendingFirebaseDatabaseUrl;
     firebaseClientEmail = pendingFirebaseClientEmail;
     firebasePrivateKey = pendingFirebasePrivateKey;
     oauthAccessToken = "";
@@ -1781,6 +1917,7 @@ void handleCommand(String cmd) {
     pendingFirebaseProjectId = "";
     pendingFirebaseClientEmail = "";
     pendingFirebasePrivateKey = "";
+    nextRealtimeUploadAt = 0;
     notifyBLE("OK: credenciais Firebase salvas.");
     if (pushDeliveryConfigured()) {
       queuePush("CONFIGURED_TEST", "Notificações configuradas!");
@@ -1902,7 +2039,7 @@ void processSerialCommands() {
 
 bool isFirebaseConfigCommand(const char* command) {
   return strncmp(command, "FB_", 3) == 0 || strncmp(command, "FCM_", 4) == 0 ||
-    strncmp(command, "PRJ_", 4) == 0 || strncmp(command, "EML_", 4) == 0 ||
+    strncmp(command, "PRJ_", 4) == 0 || strncmp(command, "DB_", 3) == 0 || strncmp(command, "EML_", 4) == 0 ||
     strncmp(command, "PK_", 3) == 0;
 }
 
@@ -1911,6 +2048,7 @@ void pushWorkerTask(void*) {
     pushNetworkBusy = true;
     processPush();
     processFcmMaintenance();
+    processRealtimeDatabase();
     pushNetworkBusy = false;
     vTaskDelay(pdMS_TO_TICKS(20));
   }
@@ -2096,6 +2234,7 @@ void loop() {
     pushNetworkBusy = true;
     processPush();
     processFcmMaintenance();
+    processRealtimeDatabase();
     pushNetworkBusy = false;
   }
 
