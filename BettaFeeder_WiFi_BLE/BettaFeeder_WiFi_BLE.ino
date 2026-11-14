@@ -362,6 +362,12 @@ void notifyBLE(const String& message) {
   }
 }
 
+void notifyRealtimeLog(const String& message) {
+  const String line = String("RTDB: ") + message;
+  if (bleConnected && txCharacteristic) notifyBLE(line);
+  else Serial.println(line);
+}
+
 void notifyPushLog(const String& message) {
   // Nunca inclua o token FCM, a chave privada ou o corpo completo de credenciais.
   saveDeviceLog(String("Push: ") + message);
@@ -801,23 +807,29 @@ bool realtimeDatabaseConfigured() {
 bool realtimeDatabasePut(const String& path, const String& json) {
   if (!realtimeDatabaseConfigured() || WiFi.status() != WL_CONNECTED || !clockIsValid()) return false;
   String token = oauthToken();
-  if (token.isEmpty()) return false;
+  if (token.isEmpty()) {
+    notifyRealtimeLog("OAuth nao forneceu access token");
+    return false;
+  }
   String url = firebaseDatabaseUrl + "/devices/bettafeeder/" + path + ".json?access_token=" + token;
   WiFiClientSecure secure;
   configureTlsClient(secure);
   HTTPClient http;
   http.setTimeout(12000);
-  if (!http.begin(secure, url)) return false;
+  if (!http.begin(secure, url)) {
+    notifyRealtimeLog(String(path) + ": falha ao abrir HTTPS");
+    return false;
+  }
   http.addHeader("Content-Type", "application/json; charset=utf-8");
   int code = http.PUT(json);
   String response = code > 0 ? http.getString() : "";
   http.end();
   if (code == 401) { oauthAccessToken = ""; oauthExpiresAtMs = 0; }
   if (code != 200) {
-    notifyPushLog(String("Realtime Database ") + path + " HTTP " + code);
+    notifyRealtimeLog(String(path) + " HTTP " + code);
     if (!response.isEmpty()) {
       if (response.length() > 120) response = response.substring(0, 120);
-      notifyPushLog(String("Realtime Database erro: ") + response);
+      notifyRealtimeLog(String(path) + " resposta: " + response);
     }
   }
   return code == 200;
@@ -885,22 +897,19 @@ void processRealtimeDatabase() {
     const unsigned long now = millis();
     if (lastRealtimeWaitLogAt == 0 || now - lastRealtimeWaitLogAt >= 60000UL) {
       lastRealtimeWaitLogAt = now;
-      Serial.print("Realtime Database: aguardando; firebase=");
-      Serial.print(configured ? "configurado" : "incompleto");
-      Serial.print("; wifi=");
-      Serial.print(wifiConnected ? "conectado" : "desconectado");
-      Serial.print("; relogio=");
-      Serial.println(timeValid ? "valido" : "aguardando NTP");
+      notifyRealtimeLog(String("aguardando; firebase=") + (configured ? "configurado" : "incompleto") +
+        "; wifi=" + (wifiConnected ? "conectado" : "desconectado") +
+        "; relogio=" + (timeValid ? "valido" : "aguardando NTP"));
     }
     return;
   }
   if (nextRealtimeUploadAt && (int32_t)(millis() - nextRealtimeUploadAt) < 0) return;
   nextRealtimeUploadAt = millis() + 60000UL;
-  Serial.println("Realtime Database: iniciando sincronizacao");
+  notifyRealtimeLog("sincronizacao iniciada");
   bool statusOk = realtimeDatabasePut("status", realtimeStatusJson());
   bool feedsOk = realtimeDatabasePut("feedHistory", realtimeFeedHistoryJson());
   bool logsOk = realtimeDatabasePut("logs", realtimeLogsJson());
-  if (statusOk && feedsOk && logsOk) Serial.println("Realtime Database: estado, alimentacoes e logs sincronizados");
+  if (statusOk && feedsOk && logsOk) notifyRealtimeLog("estado, alimentacoes e logs sincronizados");
 }
 
 bool deliverPushToToken(const String& title, const String& body, const String& targetToken,
@@ -1525,6 +1534,7 @@ void sendStatus() {
   s += ";fb_project=" + firebaseProjectId;
   s += ";fb_rtdb=" + firebaseDatabaseUrl;
   s += ";rtdb=" + String(realtimeDatabaseConfigured() ? "configurado" : "incompleto");
+  s += ";rtdb_worker=" + String(pushWorkerHandle ? "criado" : "indisponivel");
   s += ";fb_email=" + firebaseClientEmail;
   s += ";temperatura=";
   if (waterTemperatureC != DEVICE_DISCONNECTED_C && isfinite(waterTemperatureC)) {
@@ -2079,10 +2089,12 @@ void processSerialCommands() {
   }
 }
 
-bool isFirebaseConfigCommand(const char* command) {
-  return strncmp(command, "FB_", 3) == 0 || strncmp(command, "FCM_", 4) == 0 ||
-    strncmp(command, "PRJ_", 4) == 0 || strncmp(command, "DB_", 3) == 0 || strncmp(command, "EML_", 4) == 0 ||
-    strncmp(command, "PK_", 3) == 0;
+bool mutatesActiveFirebaseState(const char* command) {
+  // Staging commands only update RAM buffers and must remain responsive while
+  // HTTPS is running. Defer only commits that modify credentials or the token
+  // list currently read by the network worker.
+  return strcmp(command, "FB_SAVE") == 0 || strcmp(command, "FCM_SAVE") == 0 ||
+    strcmp(command, "FCM_REMOVE") == 0 || strcmp(command, "FCM_CLEAR") == 0;
 }
 
 void pushWorkerTask(void*) {
@@ -2260,7 +2272,7 @@ void loop() {
   }
   portEXIT_CRITICAL(&commandMux);
 
-  if (hasCommand && pushNetworkBusy && isFirebaseConfigCommand(localCommand)) {
+  if (hasCommand && pushNetworkBusy && mutatesActiveFirebaseState(localCommand)) {
     portENTER_CRITICAL(&commandMux);
     if (!commandPending) {
       strncpy(pendingCommand, localCommand, sizeof(pendingCommand));
