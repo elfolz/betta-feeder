@@ -1112,7 +1112,14 @@ window.addEventListener('load', () => {
 		$('firebaseDatabaseUrl').value = savedDatabaseUrl
 		startRealtimeDatabaseListener(savedDatabaseUrl)
 	}
-	else $('cloudDataStatus').textContent = 'Conecte ao alimentador uma vez para carregar a URL do banco e sincronizar os dados.'
+	else $('cloudDataStatus').textContent = 'Banco Firebase ainda não configurado neste celular. Conecte ao alimentador por Bluetooth ou USB uma vez para receber a URL do Realtime Database.'
+	window.addEventListener('online', () => {
+		if (realtimeDatabaseRef) $('cloudDataStatus').textContent = 'Internet disponível. Aguardando atualização do Firebase...'
+		else if (!$('firebaseDatabaseUrl').value) $('cloudDataStatus').textContent = 'Internet disponível, mas falta a URL do Realtime Database. Conecte ao alimentador uma vez.'
+	})
+	window.addEventListener('offline', () => {
+		$('cloudDataStatus').textContent = 'Celular sem conexão com a internet. O Firebase será reconectado quando a rede voltar.'
+	})
 	if ('serial' in navigator) {
 		void reconnectAuthorizedSerial()
 		navigator.serial.addEventListener('connect', () => { void reconnectAuthorizedSerial() })
@@ -1163,12 +1170,19 @@ function startRealtimeDatabaseListener(databaseUrl) {
 	if (realtimeDatabaseRef && realtimeDatabaseRef.toString().startsWith(databaseUrl)) return
 	if (realtimeDatabaseRef && realtimeDatabaseListener) realtimeDatabaseRef.off('value', realtimeDatabaseListener)
 	const appName = `BettaFeederRTDB_${new URL(databaseUrl).hostname.replace(/[^a-zA-Z0-9]/g, '_')}`
-	let databaseApp = firebase.apps.find(app => app.name === appName)
-	if (!databaseApp) {
-		const config = { ...window.BETTA_FIREBASE_CONFIG, databaseURL: databaseUrl }
-		databaseApp = firebase.initializeApp(config, appName)
+	let reference
+	try {
+		let databaseApp = firebase.apps.find(app => app.name === appName)
+		if (!databaseApp) {
+			const config = { ...window.BETTA_FIREBASE_CONFIG, databaseURL: databaseUrl }
+			databaseApp = firebase.initializeApp(config, appName)
+		}
+		reference = firebase.database(databaseApp).ref('devices/bettafeeder')
+	} catch (error) {
+		$('cloudDataStatus').textContent = `Não foi possível iniciar o Firebase: ${error?.message || error}`
+		log($('cloudDataStatus').textContent, 'error')
+		return
 	}
-	const reference = firebase.database(databaseApp).ref('devices/bettafeeder')
 	const listener = snapshot => {
 		const deviceData = snapshot.val()
 		if (!deviceData) {
