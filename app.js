@@ -1255,8 +1255,12 @@ async function enablePushNotifications() {
 	try { localStorage.removeItem(pushDisabledKey) } catch (_) { }
 	if (!window.firebase?.messaging?.isSupported) throw new Error('Firebase SDK não carregado.')
 	if (!await firebase.messaging.isSupported()) throw new Error('FCM não suportado neste dispositivo.')
-	if (!firebase.apps.length) firebase.initializeApp(window.BETTA_FIREBASE_CONFIG)
-	fbMessaging = firebase.messaging()
+	// The Realtime Database listener may already have created a named app.
+	// FCM's compat API needs the default app, so check for it by name instead
+	// of treating any initialized app as the default one.
+	let defaultFirebaseApp = firebase.apps.find(app => app.name === '[DEFAULT]')
+	if (!defaultFirebaseApp) defaultFirebaseApp = firebase.initializeApp(window.BETTA_FIREBASE_CONFIG)
+	fbMessaging = firebase.messaging(defaultFirebaseApp)
 	const registration = await navigator.serviceWorker.register('./sw.js')
 	await registration.update()
 	const token = await fbMessaging.getToken({

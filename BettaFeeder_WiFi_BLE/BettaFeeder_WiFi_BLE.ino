@@ -177,6 +177,7 @@ bool firebaseConfigEditing = false;
 String oauthAccessToken;
 unsigned long oauthExpiresAtMs = 0;
 unsigned long nextRealtimeUploadAt = 0;
+unsigned long lastRealtimeWaitLogAt = 0;
 String pendingPushEvent;
 String pendingPushText;
 struct QueuedPush {
@@ -877,9 +878,25 @@ String realtimeFeedHistoryJson() {
 }
 
 void processRealtimeDatabase() {
-  if (!realtimeDatabaseConfigured() || WiFi.status() != WL_CONNECTED || !clockIsValid()) return;
+  const bool configured = realtimeDatabaseConfigured();
+  const bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  const bool timeValid = clockIsValid();
+  if (!configured || !wifiConnected || !timeValid) {
+    const unsigned long now = millis();
+    if (lastRealtimeWaitLogAt == 0 || now - lastRealtimeWaitLogAt >= 60000UL) {
+      lastRealtimeWaitLogAt = now;
+      Serial.print("Realtime Database: aguardando; firebase=");
+      Serial.print(configured ? "configurado" : "incompleto");
+      Serial.print("; wifi=");
+      Serial.print(wifiConnected ? "conectado" : "desconectado");
+      Serial.print("; relogio=");
+      Serial.println(timeValid ? "valido" : "aguardando NTP");
+    }
+    return;
+  }
   if (nextRealtimeUploadAt && (int32_t)(millis() - nextRealtimeUploadAt) < 0) return;
   nextRealtimeUploadAt = millis() + 60000UL;
+  Serial.println("Realtime Database: iniciando sincronizacao");
   bool statusOk = realtimeDatabasePut("status", realtimeStatusJson());
   bool feedsOk = realtimeDatabasePut("feedHistory", realtimeFeedHistoryJson());
   bool logsOk = realtimeDatabasePut("logs", realtimeLogsJson());
@@ -2069,11 +2086,14 @@ bool isFirebaseConfigCommand(const char* command) {
 }
 
 void pushWorkerTask(void*) {
+  Serial.println("Worker de rede iniciado; sincronizacao RTDB habilitada.");
   for (;;) {
     pushNetworkBusy = true;
+    // RTDB does not depend on queued push events; run it first so a slow FCM
+    // delivery or periodic token validation cannot postpone its upload.
+    processRealtimeDatabase();
     processPush();
     processFcmMaintenance();
-    processRealtimeDatabase();
     pushNetworkBusy = false;
     vTaskDelay(pdMS_TO_TICKS(20));
   }
