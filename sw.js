@@ -33,8 +33,8 @@ try {
 	console.warn('SDK de push indisponível:', error)
 }
 
-const CACHE_NAME = 'bettafeeder-pwa-v93'
-const ASSETS = ['./', './index.html', './sobre.html', './styles.css', './landing-page.css', './app.js?v=73', './firebase-config.js', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/push-icon.png', './images/models/rotor.png', './images/models/base.png', './images/models/tampa.png', './images/models/presilha.png', './images/models/parafuso-presilha.png', './images/models/caixa-full-size.png', './images/models/tampa-caixa.png', './images/models/funil.png', './images/og/controle.png', './images/og/projeto.png']
+const CACHE_NAME = 'bettafeeder-pwa-v94'
+const ASSETS = ['./', './index.html', './sobre.html', './styles.css', './landing-page.css', './app.js?v=74', './firebase-config.js', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/push-icon.png', './images/models/rotor.png', './images/models/base.png', './images/models/tampa.png', './images/models/presilha.png', './images/models/parafuso-presilha.png', './images/models/caixa-full-size.png', './images/models/tampa-caixa.png', './images/models/funil.png', './images/og/controle.png', './images/og/projeto.png']
 self.addEventListener('install', event => {
 	event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)))
 	self.skipWaiting()
@@ -46,7 +46,7 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
 	if (event.request.method !== 'GET') return
 	if (new URL(event.request.url).origin !== self.location.origin) return
-	event.respondWith(fetch(event.request).then(async response => {
+	event.respondWith(fetch(event.request, { cache: 'no-cache' }).then(async response => {
 		if (response.ok) {
 			try {
 				const cache = await caches.open(CACHE_NAME)

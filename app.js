@@ -1088,13 +1088,13 @@ if ('serviceWorker' in navigator && window.isSecureContext) {
 			window.location.reload()
 		})
 
-		navigator.serviceWorker.register('./sw.js').then(registration => {
+		navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then(registration => {
 			const checkForUpdates = () => registration.update().catch(err => {
 				console.warn('Falha ao verificar atualizações do PWA:', err)
 			})
 
 			void checkForUpdates()
-			window.setInterval(checkForUpdates, 60 * 60 * 1000)
+			window.setInterval(checkForUpdates, 15 * 60 * 1000)
 			document.addEventListener('visibilitychange', () => {
 				if (document.visibilityState === 'visible') void checkForUpdates()
 			})
