@@ -90,16 +90,16 @@ function updateMotorTestControls() {
 	$('reloadButton').disabled = motorTestActive || !(isConnected() && feedReferenceReady && reloadWaitingForRefill)
 	$('motorTestBanner').hidden = !motorTestActive
 	if (motorTestActive) {
-		$('motorTestBanner').textContent = `MODO TESTE ATIVO · Proximo disparo ${motorTestNextEpoch ? new Date(motorTestNextEpoch * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }) : 'em calculo'} · ${motorTestShots}/9 nesta ativacao. O historico desde a recarga tambem pode incluir alimentacoes anteriores a esta ativacao. Cada disparo de teste conta como porcao.`
+		$('motorTestBanner').textContent = `MODO TESTE ATIVO · Próximo disparo ${motorTestNextEpoch ? new Date(motorTestNextEpoch * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }) : 'em cálculo'} · ${motorTestShots}/9 nesta ativação. O histórico desde a recarga também pode incluir alimentações anteriores a esta ativação. Cada disparo de teste conta como porção.`
 	}
 	const nextTime = motorTestNextEpoch
 		? new Date(motorTestNextEpoch * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })
 		: ''
 	if (!isConnected()) $('motorTestStatus').textContent = 'Conecte ao BettaFeeder para controlar o modo teste.'
-	else if (!motorTestSupported) $('motorTestStatus').textContent = 'O firmware conectado nao oferece modo teste.'
-	else if (motorTestActive) $('motorTestStatus').textContent = `Ativo · disparo ${Math.min(motorTestShots + 1, 9)}/9 nesta ativacao${nextTime ? ` · proximo: ${nextTime}` : ''}`
-	else if (motorTestShots >= 9) $('motorTestStatus').textContent = 'Concluido. Antes de abastecer racao real, alinhe o rotor e use Definir posição inicial para zerar a contagem.'
-	else if (motorTestShots > 0) $('motorTestStatus').textContent = 'Cancelado; disparos contam como porcoes. Antes de abastecer, alinhe o rotor e use Definir posição inicial.'
+	else if (!motorTestSupported) $('motorTestStatus').textContent = 'O firmware conectado não oferece modo teste.'
+	else if (motorTestActive) $('motorTestStatus').textContent = `Ativo · disparo ${Math.min(motorTestShots + 1, 9)}/9 nesta ativação${nextTime ? ` · próximo: ${nextTime}` : ''}`
+	else if (motorTestShots >= 9) $('motorTestStatus').textContent = 'Concluído. Antes de abastecer ração real, alinhe o rotor e use Definir posição inicial para zerar a contagem.'
+	else if (motorTestShots > 0) $('motorTestStatus').textContent = 'Cancelado; disparos contam como porções. Antes de abastecer, alinhe o rotor e use Definir posição inicial.'
 	else if (!feedReferenceReady) $('motorTestStatus').textContent = 'Passo 1: alinhe a cavidade vazia com a saída e clique em “Definir posição inicial”. Passo 2: confirme a recarga no PWA para liberar 9 porções lógicas.'
 	else if (reloadWaitingForRefill) $('motorTestStatus').textContent = 'Posição inicial definida. Confirme a recarga no PWA para liberar 9 porções lógicas.'
 	else if (!testPortionsAvailable) $('motorTestStatus').textContent = 'São necessárias pelo menos 9 porções lógicas disponíveis para iniciar o modo teste.'
@@ -1037,7 +1037,7 @@ if ('serviceWorker' in navigator && window.isSecureContext) {
 
 		navigator.serviceWorker.register('./sw.js').then(registration => {
 			const checkForUpdates = () => registration.update().catch(err => {
-				console.warn('Falha ao verificar atualizaÃ§Ãµes do PWA:', err)
+				console.warn('Falha ao verificar atualizações do PWA:', err)
 			})
 
 			void checkForUpdates()
