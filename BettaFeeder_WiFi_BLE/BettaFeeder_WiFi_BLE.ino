@@ -2126,7 +2126,7 @@ void startBLE() {
 #if NIMBLE_CPP_VERSION >= NIMBLE_CPP_VERSION_VAL(3, 0, 0)
   rx->setCallbacks(rxCallbacks);
 #else
-  rx->setCallbacks(&rxCallbacks, false);
+  rx->setCallbacks(&rxCallbacks);
 #endif
 
   service->start();
