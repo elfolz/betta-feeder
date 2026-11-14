@@ -2237,7 +2237,7 @@ void setup() {
   if (xTaskCreatePinnedToCore(pushWorkerTask, "pushWorker", 16 * 1024,
                               nullptr, 0, &pushWorkerHandle, 1) != pdPASS) {
     pushWorkerHandle = nullptr;
-    Serial.println("Push worker indisponivel; processamento fica no loop principal.");
+    Serial.println("Worker de rede indisponivel; tarefas de rede suspensas para preservar o agendamento do motor.");
   }
 }
 
@@ -2276,13 +2276,8 @@ void loop() {
   connectWiFiIfNeeded();
   processTemperature();
   processEmptyLoadReminder();
-  if (!pushWorkerHandle) {
-    pushNetworkBusy = true;
-    processPush();
-    processFcmMaintenance();
-    processRealtimeDatabase();
-    pushNetworkBusy = false;
-  }
+  // Never run blocking HTTPS work in loop(): it owns the time-critical motor
+  // schedule. Network updates run only in the lower-priority worker task.
 
   delay(10);
 }
