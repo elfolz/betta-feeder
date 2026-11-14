@@ -644,7 +644,7 @@ String signedJwt() {
   time_t now = time(nullptr);
   String header = "{\"alg\":\"RS256\",\"typ\":\"JWT\"}";
   String claims = "{\"iss\":\"" + jsonEscape(firebaseClientEmail) +
-    "\",\"scope\":\"https://www.googleapis.com/auth/firebase.messaging https://www.googleapis.com/auth/firebase.database\",\"aud\":\"https://oauth2.googleapis.com/token\",\"iat\":" +
+    "\",\"scope\":\"https://www.googleapis.com/auth/firebase.messaging https://www.googleapis.com/auth/firebase.database https://www.googleapis.com/auth/userinfo.email\",\"aud\":\"https://oauth2.googleapis.com/token\",\"iat\":" +
     String((uint32_t)now) + ",\"exp\":" + String((uint32_t)(now + 3500)) + "}";
   String input = b64urlText(header) + "." + b64urlText(claims);
   if (input.length() < 10) return "";
