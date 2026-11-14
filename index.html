@@ -88,6 +88,7 @@
 				<div class="status-item"><small>Hora do ESP32</small><strong id="clockStatus">—</strong></div>
 				<div class="status-item"><small>Wi-Fi</small><strong id="wifiStatus">—</strong></div>
 			</div>
+			<p class="helper small" id="cloudDataStatus" aria-live="polite">Aguardando dados do Firebase.</p>
 			<div class="status-actions">
 				<button id="testFeedButton" class="button button-primary" type="button" aria-busy="false" disabled><span class="connect-spinner" aria-hidden="true"></span><span class="feed-button-label">Alimentar agora</span></button>
 				<button id="reloadButton" class="button button-secondary" disabled><span class="connect-spinner" aria-hidden="true"></span><span class="reload-button-label">Confirmar recarga</span></button>
@@ -126,7 +127,7 @@
 					<span class="toggle-track" aria-hidden="true"></span>
 				</label>
 			</div>
-			<p id="motorTestBanner" class="motor-test-banner" role="status" hidden>MODO TESTE ATIVO: horarios normais e acionamentos manuais estao bloqueados. Cada disparo segue o fluxo de producao e conta como porcao.</p>
+			<p id="motorTestBanner" class="motor-test-banner" role="status" hidden>MODO TESTE ATIVO: horários normais e acionamentos manuais estão bloqueados. Cada disparo segue o fluxo de produção e conta como porção.</p>
 			<p id="motorTestHelp" class="helper small">Antes de ativar:<br>1) alinhe manualmente a cavidade vazia com a saída e clique em <strong>Definir posição inicial</strong>;<br>2) confirme a recarga no PWA para liberar pelo menos 9 porções lógicas. Não coloque ração: cada disparo de teste conta como porção e usa o mesmo histórico e push da produção. Com o relógio NTP sincronizado, o primeiro disparo será no próximo limite de 5 minutos; depois serão 3 disparos com intervalo de 5 min, 3 com intervalo de 10 min e 3 com intervalo de 15 min. Após o teste, alinhe novamente a cavidade vazia e use <strong>Definir posição inicial</strong> antes de abastecer ração real.</p>
 			<div id="feedingHistory" class="feeding-history" hidden aria-live="polite">
 				<h3>Últimas alimentações desde a recarga</h3>
@@ -222,10 +223,15 @@
 					<input id="firebaseClientEmail" type="email" maxlength="160" placeholder="firebase-adminsdk@projeto.iam.gserviceaccount.com" autocomplete="off" disabled required>
 				</label>
 				<label class="input-field">
+					<span>URL do Realtime Database</span>
+					<input id="firebaseDatabaseUrl" type="url" maxlength="160" placeholder="https://seu-projeto-default-rtdb.firebaseio.com" autocomplete="url" disabled required>
+				</label>
+				<label class="input-field">
 					<span>Chave privada da conta de serviço (PEM)</span>
 					<textarea id="firebasePrivateKey" rows="5" maxlength="1900" placeholder="Cole o campo private_key do JSON da conta de serviço. Deixe vazio para manter a chave já salva." autocomplete="off" spellcheck="false" disabled></textarea>
 				</label>
 			<p class="helper small">O ID do projeto deve corresponder ao projeto configurado em <code>firebase-config.js</code>.</p>
+			<p class="helper small">O Firebase é somente para acompanhar os dados enviados pelo alimentador. Para alterar horários ou controlar o aparelho, conecte por Bluetooth ou USB Serial.</p>
 			<p class="privacy-note"><svg viewBox="0 0 24 24" aria-hidden="true">
 					<rect x="5" y="10" width="14" height="11" rx="2" />
 					<path d="M8 10V7a4 4 0 0 1 8 0v3" />
@@ -286,7 +292,8 @@
 	<script src="./firebase-config.js" defer></script>
 	<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js" defer></script>
 	<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-compat.js" defer></script>
-	<script src="./app.js?v=70" defer></script>
+	<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js" defer></script>
+	<script src="./app.js?v=71" defer></script>
 </body>
 
 </html>

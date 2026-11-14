@@ -162,17 +162,21 @@ String pendingFcmToken;
 bool pendingFcmRemoval = false;
 size_t expectedFcmLength = 0;
 String firebaseProjectId;
+String firebaseDatabaseUrl;
 String firebaseClientEmail;
 String firebasePrivateKey;
 String pendingFirebaseProjectId;
+String pendingFirebaseDatabaseUrl;
 String pendingFirebaseClientEmail;
 String pendingFirebasePrivateKey;
 size_t expectedFirebaseProjectLength = 0;
+size_t expectedFirebaseDatabaseLength = 0;
 size_t expectedFirebaseEmailLength = 0;
 size_t expectedFirebasePrivateKeyLength = 0;
 bool firebaseConfigEditing = false;
 String oauthAccessToken;
 unsigned long oauthExpiresAtMs = 0;
+unsigned long nextRealtimeUploadAt = 0;
 String pendingPushEvent;
 String pendingPushText;
 struct QueuedPush {
@@ -227,7 +231,7 @@ void appendFeedHistory(bool success, const char* reason, uint8_t portion = 0, ui
   record.epoch = epoch;
   record.success = success ? 1 : 0;
   record.portion = portion;
-  String(reason).substring(0, sizeof(record.reason) - 1).toCharArray(record.reason, sizeof(record.reason));
+  strlcpy(record.reason, reason ? reason : "", sizeof(record.reason));
   feedHistory[feedHistoryNext] = record;
   prefs.putBytes(feedHistoryKey(feedHistoryNext).c_str(), &record, sizeof(record));
   feedHistoryNext = (feedHistoryNext + 1) % FEED_HISTORY_CAPACITY;
@@ -275,9 +279,13 @@ void saveDeviceLog(const String& message) {
   DeviceLogRecord record{};
   time_t now = time(nullptr);
   if (now >= 1735689600) record.epoch = static_cast<uint32_t>(now);
-  String safe = message;
-  safe.replace("\n", " "); safe.replace("\r", " ");
-  safe.substring(0, sizeof(record.message) - 1).toCharArray(record.message, sizeof(record.message));
+  size_t copied = 0;
+  while (copied < message.length() && copied < sizeof(record.message) - 1) {
+    const char c = message[copied];
+    record.message[copied] = (c == '\n' || c == '\r') ? ' ' : c;
+    copied++;
+  }
+  record.message[copied] = '\0';
   prefs.putBytes(deviceLogKey(deviceLogNext).c_str(), &record, sizeof(record));
   deviceLogNext = (deviceLogNext + 1) % DEVICE_LOG_CAPACITY;
   if (deviceLogCount < DEVICE_LOG_CAPACITY) deviceLogCount++;
@@ -364,6 +372,7 @@ void notifyPushLog(const String& message) {
 void saveSettings() {
   // Token de notificacao fica no NVS, nunca em logs BLE.
   prefs.putString("ssid", wifiSSID);
+  prefs.putString("fbRtdb", firebaseDatabaseUrl);
   prefs.putString("pass", wifiPASS);
   prefs.putUShort("feed1", feedMinute[0]);
   prefs.putUShort("feed2", feedMinute[1]);
@@ -454,6 +463,7 @@ void loadSettings() {
     if (!legacyToken.isEmpty()) { fcmTargetTokens[0] = legacyToken; fcmTargetCount = 1; saveFcmDevices(); }
   }
   firebaseProjectId = prefs.getString("fbProject", "");
+  firebaseDatabaseUrl = prefs.getString("fbRtdb", "");
   firebaseClientEmail = prefs.getString("fbEmail", "");
   firebasePrivateKey = "";
   size_t savedKeyLength = prefs.getBytesLength("fbKeyBin");
@@ -568,7 +578,7 @@ void rotateToNextPocket(const char* source, bool settleForFood = true) {
 
 bool jogMotor(bool forward) {
   if (feedInProgress || motionInProgress) {
-    notifyBLE("BLOQUEADO: motor ocupado.");
+    notifyBLE("BLOQUEADO: Motor ocupado");
     return false;
   }
   // A jog changes the physical rotor angle without a sensor to track it.
@@ -627,7 +637,7 @@ String signedJwt() {
   time_t now = time(nullptr);
   String header = "{\"alg\":\"RS256\",\"typ\":\"JWT\"}";
   String claims = "{\"iss\":\"" + jsonEscape(firebaseClientEmail) +
-    "\",\"scope\":\"https://www.googleapis.com/auth/firebase.messaging\",\"aud\":\"https://oauth2.googleapis.com/token\",\"iat\":" +
+    "\",\"scope\":\"https://www.googleapis.com/auth/firebase.messaging https://www.googleapis.com/auth/firebase.database\",\"aud\":\"https://oauth2.googleapis.com/token\",\"iat\":" +
     String((uint32_t)now) + ",\"exp\":" + String((uint32_t)(now + 3500)) + "}";
   String input = b64urlText(header) + "." + b64urlText(claims);
   if (input.length() < 10) return "";
@@ -712,10 +722,8 @@ bool isTlsMemoryError(WiFiClientSecure& secure) {
 }
 void configureTlsClient(WiFiClientSecure& secure) {
   // O bundle de CAs usa memoria adicional durante o handshake. Com BLE
-  // ativo, o ESP32 pode ficar com pouca heap e falhar antes de abrir o
-  // socket (BIGNUM/Memory allocation failed). Nesse caso, evita manter um
-  // segundo cliente TLS de fallback vivo e usa TLS sem validacao de CA.
-  // Em heap normal, a cadeia de certificados continua sendo validada.
+  // ativo, o ESP32 pode ficar com pouca heap; nesse caso, libera o handshake
+  // sem validacao de CA para manter o envio disponivel.
   if (ESP.getFreeHeap() < 70000) {
     notifyPushLog(String("TLS: heap baixa (") + ESP.getFreeHeap() + "); sem validacao de CA");
     secure.setInsecure();
@@ -740,7 +748,7 @@ String oauthToken() {
   }
   bool tlsLowMemory = ESP.getFreeHeap() < 70000;
   WiFiClientSecure secure;
-  configureTlsClient(secure); // mantém validação do certificado; sem setInsecure()
+  configureTlsClient(secure);
   HTTPClient http;
   http.setTimeout(12000);
   if (!http.begin(secure, "https://oauth2.googleapis.com/token")) {
@@ -784,6 +792,100 @@ String oauthToken() {
   notifyPushLog(oauthAccessToken.isEmpty() ? "OAuth: resposta sem access_token" : "OAuth: access token obtido");
   return oauthAccessToken;
 }
+
+bool realtimeDatabaseConfigured() {
+  return firebaseConfigured() && firebaseDatabaseUrl.startsWith("https://");
+}
+
+bool realtimeDatabasePut(const String& path, const String& json) {
+  if (!realtimeDatabaseConfigured() || WiFi.status() != WL_CONNECTED || !clockIsValid()) return false;
+  String token = oauthToken();
+  if (token.isEmpty()) return false;
+  String url = firebaseDatabaseUrl + "/devices/bettafeeder/" + path + ".json?access_token=" + token;
+  WiFiClientSecure secure;
+  configureTlsClient(secure);
+  HTTPClient http;
+  http.setTimeout(12000);
+  if (!http.begin(secure, url)) return false;
+  http.addHeader("Content-Type", "application/json; charset=utf-8");
+  int code = http.PUT(json);
+  String response = code > 0 ? http.getString() : "";
+  http.end();
+  if (code == 401) { oauthAccessToken = ""; oauthExpiresAtMs = 0; }
+  if (code != 200) {
+    notifyPushLog(String("Realtime Database ") + path + " HTTP " + code);
+    if (!response.isEmpty()) {
+      if (response.length() > 120) response = response.substring(0, 120);
+      notifyPushLog(String("Realtime Database erro: ") + response);
+    }
+  }
+  return code == 200;
+}
+
+String realtimeStatusJson() {
+  time_t now = time(nullptr);
+  uint8_t remaining = awaitingReload || portionsDispensed >= PORTIONS_PER_LOAD
+    ? 0 : PORTIONS_PER_LOAD - portionsDispensed;
+  String json = "{\"updatedAt\":" + String((uint32_t)now) +
+    ",\"wifi\":\"" + String(WiFi.status() == WL_CONNECTED ? "conectado" : "desconectado") +
+    "\",\"ssid\":\"" + jsonEscape(wifiSSID) +
+    "\",\"feed1\":\"" + formatHHMM(feedMinute[0]) +
+    "\",\"feed2\":\"" + formatHHMM(feedMinute[1]) +
+    "\",\"portionsRemaining\":" + String(remaining) +
+    ",\"portionsDispensed\":" + String(portionsDispensed) +
+    ",\"batchState\":\"" + String(awaitingReload ? "aguardando_recarga" : "pronto") +
+    "\",\"referenceValid\":" + String(referenceValid ? "true" : "false") +
+    ",\"temperatureC\":";
+  if (waterTemperatureC != DEVICE_DISCONNECTED_C && isfinite(waterTemperatureC)) json += String(waterTemperatureC, 1);
+  else json += "null";
+  json += ",\"clockValid\":" + String(clockIsValid() ? "true" : "false") +
+    ",\"motorTest\":" + String(motorTestMode ? "true" : "false") + "}";
+  return json;
+}
+
+String realtimeLogsJson() {
+  String json = "[";
+  uint8_t first = (deviceLogNext + DEVICE_LOG_CAPACITY - deviceLogCount) % DEVICE_LOG_CAPACITY;
+  bool comma = false;
+  for (uint8_t i = 0; i < deviceLogCount; i++) {
+    DeviceLogRecord record{};
+    uint8_t slot = (first + i) % DEVICE_LOG_CAPACITY;
+    if (prefs.getBytes(deviceLogKey(slot).c_str(), &record, sizeof(record)) != sizeof(record)) continue;
+    if (strncmp(record.message, "Push:", 5) == 0) continue;
+    if (comma) json += ",";
+    comma = true;
+    json += "{\"timestamp\":" + String(record.epoch) + ",\"message\":\"" + jsonEscape(String(record.message)) + "\"}";
+  }
+  json += "]";
+  return json;
+}
+
+String realtimeFeedHistoryJson() {
+  String json = "[";
+  uint8_t first = (feedHistoryNext + FEED_HISTORY_CAPACITY - feedHistoryCount) % FEED_HISTORY_CAPACITY;
+  bool comma = false;
+  for (uint8_t i = 0; i < feedHistoryCount; i++) {
+    const FeedHistoryRecord& record = feedHistory[(first + i) % FEED_HISTORY_CAPACITY];
+    if (!isValidFeedHistoryRecord(record)) continue;
+    if (comma) json += ",";
+    comma = true;
+    json += "{\"timestamp\":" + String(record.epoch) + ",\"success\":" + String(record.success ? "true" : "false") +
+      ",\"portion\":" + String(record.portion) + ",\"reason\":\"" + jsonEscape(String(record.reason)) + "\"}";
+  }
+  json += "]";
+  return json;
+}
+
+void processRealtimeDatabase() {
+  if (!realtimeDatabaseConfigured() || WiFi.status() != WL_CONNECTED || !clockIsValid()) return;
+  if (nextRealtimeUploadAt && (int32_t)(millis() - nextRealtimeUploadAt) < 0) return;
+  nextRealtimeUploadAt = millis() + 60000UL;
+  bool statusOk = realtimeDatabasePut("status", realtimeStatusJson());
+  bool feedsOk = realtimeDatabasePut("feedHistory", realtimeFeedHistoryJson());
+  bool logsOk = realtimeDatabasePut("logs", realtimeLogsJson());
+  if (statusOk && feedsOk && logsOk) Serial.println("Realtime Database: estado, alimentacoes e logs sincronizados");
+}
+
 bool deliverPushToToken(const String& title, const String& body, const String& targetToken,
                         bool& tokenInvalid, bool validateOnly = false) {
   tokenInvalid = false;
@@ -872,18 +974,19 @@ bool deliverPush(const String& title, const String& body) {
   if (!hasFcmDevices()) return false;
   bool allActiveDevicesDelivered = true;
   uint8_t count = fcmTargetCount;
-  String invalidTokens[FCM_DEVICE_CAPACITY];
-  uint8_t invalidCount = 0;
+  bool invalidTargets[FCM_DEVICE_CAPACITY] = {};
   for (uint8_t i = 0; i < count; i++) {
     notifyPushLog(String("enviando para dispositivo ") + (i + 1) + "/" + count);
     bool tokenInvalid = false;
     const String targetToken = fcmTargetTokens[i];
     bool sent = deliverPushToToken(title, body, targetToken, tokenInvalid);
     if (!sent && !tokenInvalid) allActiveDevicesDelivered = false;
-    if (tokenInvalid) invalidTokens[invalidCount++] = targetToken;
+    if (tokenInvalid) invalidTargets[i] = true;
   }
-  for (uint8_t i = 0; i < invalidCount; i++) {
-    if (removeFcmToken(invalidTokens[i])) {
+  for (int i = count - 1; i >= 0; i--) {
+    if (!invalidTargets[i]) continue;
+    const String invalidToken = fcmTargetTokens[i];
+    if (removeFcmToken(invalidToken)) {
       notifyPushLog(String("token FCM expirado removido; restantes=") + fcmTargetCount);
     } else {
       notifyPushLog("falha ao remover token FCM expirado do NVS");
@@ -909,19 +1012,20 @@ void processFcmMaintenance() {
 
   notifyPushLog("validacao periodica dos destinos FCM iniciada");
   uint8_t count = fcmTargetCount;
-  String invalidTokens[FCM_DEVICE_CAPACITY];
-  uint8_t invalidCount = 0;
+  bool invalidTargets[FCM_DEVICE_CAPACITY] = {};
   bool retryNeeded = false;
   for (uint8_t i = 0; i < count; i++) {
     bool tokenInvalid = false;
     const String targetToken = fcmTargetTokens[i];
     bool valid = deliverPushToToken("BettaFeeder", "Validacao de destino.",
                                     targetToken, tokenInvalid, true);
-    if (tokenInvalid) invalidTokens[invalidCount++] = targetToken;
+    if (tokenInvalid) invalidTargets[i] = true;
     else if (!valid) retryNeeded = true;
   }
-  for (uint8_t i = 0; i < invalidCount; i++) {
-    if (removeFcmToken(invalidTokens[i])) {
+  for (int i = count - 1; i >= 0; i--) {
+    if (!invalidTargets[i]) continue;
+    const String invalidToken = fcmTargetTokens[i];
+    if (removeFcmToken(invalidToken)) {
       notifyPushLog(String("destino FCM sem registro removido; restantes=") + fcmTargetCount);
     } else {
       notifyPushLog("falha ao remover destino FCM sem registro do NVS");
@@ -955,7 +1059,7 @@ void clearQueuedPushesLocked() {
 }
 
 void queuePush(const String& event, const String& text) {
-  if (!pushDeliveryConfigured()) return;
+  if (!pushQueueMutex || !pushDeliveryConfigured()) return;
   bool updated = false;
   bool dropped = false;
   xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
@@ -988,6 +1092,7 @@ void queuePush(const String& event, const String& text) {
 }
 
 bool hasQueuedPush(const String& event) {
+  if (!pushQueueMutex) return false;
   bool found = false;
   xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
   if (pendingPushEvent == event) found = true;
@@ -999,6 +1104,7 @@ bool hasQueuedPush(const String& event) {
 }
 
 bool hasPendingPush() {
+  if (!pushQueueMutex) return false;
   xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
   const bool pending = !pendingPushEvent.isEmpty();
   xSemaphoreGive(pushQueueMutex);
@@ -1006,6 +1112,7 @@ bool hasPendingPush() {
 }
 
 void cancelQueuedPush(const String& event) {
+  if (!pushQueueMutex) return;
   xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
   if (pendingPushEvent == event) {
     pendingPushEvent = "";
@@ -1025,12 +1132,14 @@ void cancelQueuedPush(const String& event) {
 }
 
 void clearQueuedPushes() {
+  if (!pushQueueMutex) return;
   xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
   clearQueuedPushesLocked();
   xSemaphoreGive(pushQueueMutex);
 }
 
 void processPush() {
+  if (!pushQueueMutex) return;
   String deliveredEvent;
   String deliveredText;
   if (!pushDeliveryConfigured()) {
@@ -1099,7 +1208,7 @@ void processEmptyLoadReminder() {
   if (lastEmptyReminderEpoch != 0 &&
       static_cast<uint32_t>(nowEpoch - lastEmptyReminderEpoch) < EMPTY_REMINDER_INTERVAL_SECONDS) return;
 
-  queuePush("EMPTY_REMINDER", "O alimentador está sem porções. Reabasteça e confirme a recarga no App.");
+  queuePush("EMPTY_REMINDER", "O alimentador está sem porções. Reabasteça e confirme a recarga no App");
 }
 
 bool feedOnePortion(const char* source, bool testMode = false) {
@@ -1107,17 +1216,17 @@ bool feedOnePortion(const char* source, bool testMode = false) {
   if (feedInProgress || motionInProgress) {
     appendFeedHistory(false, "motor_busy", nextPortion);
     saveDeviceLog(String("Alimentacao bloqueada (") + source + "): motor ocupado.");
-    notifyBLE("BLOQUEADO: motor ocupado."); return false;
+    notifyBLE("BLOQUEADO: Motor ocupado"); return false;
   }
   if (!referenceValid) {
     appendFeedHistory(false, "position_unknown", nextPortion);
     saveDeviceLog(String("Alimentacao bloqueada (") + source + "): referencia desconhecida.");
-    notifyBLE("BLOQUEADO: referencia desconhecida. Confira a posicao fisica e envie SET_HOME."); return false;
+    notifyBLE("BLOQUEADO: Referência desconhecida. Confira a posição física e envie SET_HOME"); return false;
   }
   if (awaitingReload || portionsDispensed >= PORTIONS_PER_LOAD) {
     appendFeedHistory(false, "batch_empty", 0);
     saveDeviceLog(String("Alimentacao bloqueada (") + source + "): lote aguardando recarga.");
-    notifyBLE("LOTE_VAZIO: alimentador parado. Reabasteca e confirme a recarga no PWA.");
+    notifyBLE("LOTE_VAZIO: Alimentador parado. Reabasteça e confirme a recarga pelo App");
     return false;
   }
   const bool firstFeedAfterReload = portionsDispensed == 0 && rotorPosition == PORTIONS_PER_LOAD;
@@ -1125,7 +1234,7 @@ bool feedOnePortion(const char* source, bool testMode = false) {
     appendFeedHistory(false, "position_mismatch", nextPortion);
     referenceValid = false;
     saveSettings();
-    notifyBLE("FALHA: indice inconsistente. Confira fisicamente e envie SET_HOME."); return false;
+    notifyBLE("FALHA: Índice inconsistente. Confira fisicamente e envie SET_HOME"); return false;
   }
   feedInProgress = true;
   // After refill at pocket 14, this scheduled feeding advances over the
@@ -1148,14 +1257,13 @@ bool feedOnePortion(const char* source, bool testMode = false) {
   saveSettings();
   saveDeviceLog(String("Comando do motor enviado (") + source + "); lote=" + String(portionsDispensed) + "/14.");
   notifyBLE(String("ALIMENTACAO: ") + source + "; porcoes_no_lote=" + String(portionsDispensed) + "/14");
-  queuePush("FEED_COMMANDED", String(testMode ? "MODO TESTE: " : "") + "Comando de passos para porcao " + String(portionsDispensed) +
-            "/14 enviado as " + commandClock + ". Movimento fisico e queda da racao nao sao confirmados pelo ESP32.");
+  queuePush("FEED_COMMANDED", String(testMode ? "MODO TESTE: " : "") + "Porção " + String(portionsDispensed) + "/14 disponibilizada às " + commandClock);
   if (portionsDispensed == PORTIONS_PER_LOAD) {
     // Stop at pocket 14 until the owner refills and confirms through the PWA.
     awaitingReload = true;
     saveSettings();
-    notifyBLE("LOTE_FINALIZADO: sequencia do motor da porcao 14 executada. Verifique e reabasteca o alimentador.");
-    queuePush("EMPTY", "Sequencia do motor da porcao 14 executada. Verifique e reabasteca o alimentador.");
+    notifyBLE("LOTE_FINALIZADO: Última porção disponibilizada. Verifique e reabasteça o alimentador");
+    queuePush("EMPTY", "Última porção disponibilizada. Verifique e reabasteça o alimentador");
   }
   feedInProgress = false;
   return true;
@@ -1224,7 +1332,7 @@ void processMotorTestSchedule() {
     motorTestMode = false;
     motorTestNextEpoch = 0;
     saveSettings();
-    saveDeviceLog("Teste do motor concluido. Os disparos foram contabilizados como porcoes pelo fluxo de producao.");
+    saveDeviceLog("Teste do motor concluído. Os disparos foram contabilizados como porções pelo fluxo de produção.");
     notifyBLE(String("MOTOR_TEST_STATE:OFF:") + motorTestShots);
   } else {
     notifyBLE(String("MOTOR_TEST_NEXT:") + motorTestNextEpoch);
@@ -1239,7 +1347,7 @@ void connectWiFiIfNeeded() {
       // Brazil standard time: UTC-3. Brazil currently has no daylight saving time.
       configTzTime("BRT3", "pool.ntp.org", "time.google.com", "br.pool.ntp.org");
       ntpConfigured = true;
-      notifyBLE("NTP: sincronizacao solicitada.");
+      notifyBLE("NTP: Sincronização solicitada");
     }
     return;
   }
@@ -1250,7 +1358,7 @@ void connectWiFiIfNeeded() {
       WiFi.disconnect();
       wifiConnecting = false;
       lastWiFiAttempt = now;
-      notifyBLE("WIFI: tempo esgotado; nova tentativa em 30 segundos.");
+      notifyBLE("WIFI: Tempo esgotado; nova tentativa em 30 segundos");
     }
     return;
   }
@@ -1261,7 +1369,7 @@ void connectWiFiIfNeeded() {
     wifiConnecting = true;
     WiFi.mode(WIFI_STA);
     WiFi.begin(wifiSSID.c_str(), wifiPASS.c_str());
-    notifyBLE("WIFI: tentando conectar a " + wifiSSID);
+    notifyBLE("WIFI: Tentando conectar a " + wifiSSID);
   }
 }
 
@@ -1292,7 +1400,7 @@ void processSchedule() {
       if (currentMinute >= feedMinute[slot] && lastFeedDate[slot] != today) {
         lastFeedDate[slot] = today;
         saveDeviceLog(String("Horario ") + (slot + 1) +
-          " ja vencido na confirmacao da recarga; proxima porcao aguardara o proximo horario configurado.");
+          " já vencido na confirmação da recarga; próxima porção aguardará o próximo horário configurado.");
       }
     }
     suppressOverdueAfterReload = false;
@@ -1360,8 +1468,8 @@ void processSchedule() {
       }
     } else {
       appendFeedHistory(false, "schedule_too_late", portionsDispensed < PORTIONS_PER_LOAD ? portionsDispensed + 1 : 0);
-      String missedMessage = String("Horario ") + (slot == 0 ? "1" : "2") +
-        " perdido: atraso maior que 30 minutos; alimentacao ignorada.";
+      String missedMessage = String("Horário ") + (slot == 0 ? "1" : "2") +
+        " perdido: atraso maior que 30 minutos. Alimentação ignorada";
       notifyBLE(String("HORARIO_PERDIDO: ") + missedMessage);
       saveDeviceLog(missedMessage);
       queuePush("HORARIO_PERDIDO", missedMessage);
@@ -1398,6 +1506,8 @@ void sendStatus() {
   s += ";push=" + String(hasFcmDevices() ? "configurado" : "sem_destino");
   s += ";firebase=" + String(firebaseConfigured() ? "configurado" : "incompleto");
   s += ";fb_project=" + firebaseProjectId;
+  s += ";fb_rtdb=" + firebaseDatabaseUrl;
+  s += ";rtdb=" + String(realtimeDatabaseConfigured() ? "configurado" : "incompleto");
   s += ";fb_email=" + firebaseClientEmail;
   s += ";temperatura=";
   if (waterTemperatureC != DEVICE_DISCONNECTED_C && isfinite(waterTemperatureC)) {
@@ -1406,6 +1516,42 @@ void sendStatus() {
     s += "indisponivel";
   }
   notifyBLE(s);
+}
+
+void updateTemperatureAlert(float measured, bool high, uint32_t nowEpoch) {
+  bool& active = high ? highTemperatureAlertActive : lowTemperatureAlertActive;
+  uint32_t& lastAlertEpoch = high ? lastHighTemperatureAlertEpoch : lastLowTemperatureAlertEpoch;
+  const float limit = high ? HIGH_TEMPERATURE_LIMIT_C : LOW_TEMPERATURE_LIMIT_C;
+  const char* activeKey = high ? "tempHighOn" : "tempLowOn";
+  const char* epochKey = high ? "tempHighAt" : "tempLowAt";
+  const char* event = high ? "TEMPERATURA_ALTA" : "TEMPERATURA_BAIXA";
+  const bool thresholdExceeded = high ? measured > limit : measured < limit;
+  const bool returnedToSafeRange = high
+    ? measured <= limit - 0.5f
+    : measured >= limit + 0.5f;
+
+  if (thresholdExceeded &&
+      (!active || (nowEpoch && lastAlertEpoch &&
+        static_cast<uint32_t>(nowEpoch - lastAlertEpoch) >= TEMPERATURE_ALERT_INTERVAL_SECONDS))) {
+    active = true;
+    lastAlertEpoch = nowEpoch;
+    prefs.putBool(activeKey, true);
+    prefs.putUInt(epochKey, lastAlertEpoch);
+    String alertText = String("Temperatura da água ") + (high ? "alta: " : "baixa: ") +
+      String(measured, 1) + " °C. Limite: " + String(static_cast<int>(limit)) + " °C";
+    notifyBLE(String("ALERTA_TEMPERATURA: ") + alertText);
+    queuePush(event, alertText);
+  } else if (returnedToSafeRange) {
+    active = false;
+    lastAlertEpoch = 0;
+    prefs.putBool(activeKey, false);
+    prefs.putUInt(epochKey, 0);
+    cancelQueuedPush(event);
+  } else if (active && !lastAlertEpoch && nowEpoch) {
+    // Start the persistent repeat interval once NTP becomes available.
+    lastAlertEpoch = nowEpoch;
+    prefs.putUInt(epochKey, lastAlertEpoch);
+  }
 }
 
 void processTemperature() {
@@ -1425,48 +1571,8 @@ void processTemperature() {
     const bool hasValidClock = clockIsValid() && epochNow >= 1735689600;
     const uint32_t nowEpoch = hasValidClock ? static_cast<uint32_t>(epochNow) : 0;
 
-    if (measured < LOW_TEMPERATURE_LIMIT_C &&
-        (!lowTemperatureAlertActive || (nowEpoch && lastLowTemperatureAlertEpoch &&
-          static_cast<uint32_t>(nowEpoch - lastLowTemperatureAlertEpoch) >= TEMPERATURE_ALERT_INTERVAL_SECONDS))) {
-      lowTemperatureAlertActive = true;
-      lastLowTemperatureAlertEpoch = nowEpoch;
-      prefs.putBool("tempLowOn", true);
-      prefs.putUInt("tempLowAt", lastLowTemperatureAlertEpoch);
-      String alertText = "Temperatura da agua baixa: " + String(measured, 1) + " °C. Limite: 24 °C.";
-      notifyBLE(String("ALERTA_TEMPERATURA: ") + alertText);
-      queuePush("TEMPERATURA_BAIXA", alertText);
-    } else if (measured >= LOW_TEMPERATURE_LIMIT_C + 0.5f) {
-      lowTemperatureAlertActive = false;
-      lastLowTemperatureAlertEpoch = 0;
-      prefs.putBool("tempLowOn", false);
-      prefs.putUInt("tempLowAt", 0);
-      cancelQueuedPush("TEMPERATURA_BAIXA");
-    } else if (lowTemperatureAlertActive && !lastLowTemperatureAlertEpoch && nowEpoch) {
-      // Start the persistent 30-minute interval once NTP becomes available.
-      lastLowTemperatureAlertEpoch = nowEpoch;
-      prefs.putUInt("tempLowAt", lastLowTemperatureAlertEpoch);
-    }
-
-    if (measured > HIGH_TEMPERATURE_LIMIT_C &&
-        (!highTemperatureAlertActive || (nowEpoch && lastHighTemperatureAlertEpoch &&
-          static_cast<uint32_t>(nowEpoch - lastHighTemperatureAlertEpoch) >= TEMPERATURE_ALERT_INTERVAL_SECONDS))) {
-      highTemperatureAlertActive = true;
-      lastHighTemperatureAlertEpoch = nowEpoch;
-      prefs.putBool("tempHighOn", true);
-      prefs.putUInt("tempHighAt", lastHighTemperatureAlertEpoch);
-      String alertText = "Temperatura da agua alta: " + String(measured, 1) + " °C. Limite: 28 °C.";
-      notifyBLE(String("ALERTA_TEMPERATURA: ") + alertText);
-      queuePush("TEMPERATURA_ALTA", alertText);
-    } else if (measured <= HIGH_TEMPERATURE_LIMIT_C - 0.5f) {
-      highTemperatureAlertActive = false;
-      lastHighTemperatureAlertEpoch = 0;
-      prefs.putBool("tempHighOn", false);
-      prefs.putUInt("tempHighAt", 0);
-      cancelQueuedPush("TEMPERATURA_ALTA");
-    } else if (highTemperatureAlertActive && !lastHighTemperatureAlertEpoch && nowEpoch) {
-      lastHighTemperatureAlertEpoch = nowEpoch;
-      prefs.putUInt("tempHighAt", lastHighTemperatureAlertEpoch);
-    }
+    updateTemperatureAlert(measured, false, nowEpoch);
+    updateTemperatureAlert(measured, true, nowEpoch);
   }
 
   if (!temperatureConversionPending &&
@@ -1498,13 +1604,13 @@ void handleCommand(String cmd) {
   if (key == "TEST_MODE") {
     if (value.equalsIgnoreCase("ON")) {
       if (!motorTestMode && (!referenceValid || motionInProgress || feedInProgress || awaitingReload || portionsDispensed > PORTIONS_PER_LOAD - 9)) {
-        notifyBLE("ERRO: defina SET_HOME e confirme uma recarga com pelo menos 9 porcoes disponiveis antes do teste.");
+        notifyBLE("ERRO: Defina SET_HOME e confirme uma recarga com pelo menos 9 porções disponíveis antes do teste");
         return;
       }
       if (!motorTestMode) {
         time_t now = time(nullptr);
         if (now < 1735689600) {
-          notifyBLE("ERRO: sincronize o relogio NTP antes de iniciar o teste.");
+          notifyBLE("ERRO: Sincronize o relógio NTP antes de iniciar o teste");
           return;
         }
         motorTestShots = 0;
@@ -1525,18 +1631,18 @@ void handleCommand(String cmd) {
         motorTestNextEpoch = 0;
         saveSettings();
         saveDeviceLog(String("Modo de teste do motor cancelado apos ") + motorTestShots +
-          "/9 disparos; porcoes contabilizadas pelo fluxo normal; reposicione o rotor e use SET_HOME antes de abastecer racao real.");
+          "/9 disparos; porções contabilizadas pelo fluxo normal; reposicione o rotor e use SET_HOME antes de abastecer ração real.");
       }
       notifyBLE(String("OK: MOTOR_TEST=OFF:") + motorTestShots + ":0");
     } else {
-      notifyBLE("ERRO: use TEST_MODE=ON ou TEST_MODE=OFF.");
+      notifyBLE("ERRO: Use TEST_MODE=ON ou TEST_MODE=OFF");
     }
     return;
   }
 
   if (motorTestMode && key != "STATUS" && key != "LOGS" && key != "FEED_HISTORY" &&
       !isPushCommandAllowedDuringTest(key)) {
-    notifyBLE("ERRO: desligue o modo de teste antes de outros comandos.");
+    notifyBLE("ERRO: Desligue o modo de teste antes de outros comandos");
     return;
   }
 
@@ -1548,18 +1654,18 @@ void handleCommand(String cmd) {
     wifiConnecting = false;
     lastWiFiAttempt = 0;
     WiFi.disconnect(true);
-    notifyBLE("OK: SSID salvo; conectando ao Wi-Fi.");
+    notifyBLE("OK: SSID salvo. Conectando ao Wi-Fi");
   } else if (key == "PASS") {
     wifiPASS = value;
     saveSettings();
     wifiConnecting = false;
     lastWiFiAttempt = 0;
     WiFi.disconnect(true);
-    notifyBLE("OK: senha Wi-Fi salva.");
+    notifyBLE("OK: Senha Wi-Fi salva");
   } else if (key == "FEED1" || key == "FEED2") {
     uint16_t parsed;
     if (!parseHHMM(value, parsed)) {
-      notifyBLE("ERRO: use HH:MM, por exemplo FEED1=08:00.");
+      notifyBLE("ERRO: Use HH:MM, por exemplo FEED1=08:00");
       return;
     }
     feedMinute[key == "FEED1" ? 0 : 1] = parsed;
@@ -1568,19 +1674,19 @@ void handleCommand(String cmd) {
   } else if (key == "TIMES") {
     int comma = value.indexOf(',');
     if (comma < 0 || value.indexOf(',', comma + 1) >= 0) {
-      notifyBLE("ERRO: use TIMES=08:00,20:00.");
+      notifyBLE("ERRO: Use TIMES=08:00,20:00");
       return;
     }
     uint16_t first, second;
     if (!parseHHMM(value.substring(0, comma), first) ||
         !parseHHMM(value.substring(comma + 1), second) || first == second) {
-      notifyBLE("ERRO: informe dois horarios validos e diferentes (HH:MM,HH:MM).");
+      notifyBLE("ERRO: Informe dois horários válidos e diferentes (HH:MM,HH:MM)");
       return;
     }
     feedMinute[0] = first;
     feedMinute[1] = second;
     saveSettings();
-    notifyBLE("OK: horarios salvos=" + formatHHMM(first) + "," + formatHHMM(second));
+    notifyBLE("OK: Horários salvos=" + formatHHMM(first) + "," + formatHHMM(second));
   } else if (key == "STATUS") {
     sendStatus();
   } else if (key == "LOGS") {
@@ -1608,15 +1714,15 @@ void handleCommand(String cmd) {
     referenceValid = true;
     motionInProgress = false;
     saveSettings();
-    notifyBLE("OK: posicao inicial definida. Abasteca as cavidades e confirme a recarga pelo botao do PWA.");
+    notifyBLE("OK: Posição inicial definida. Abasteça o alimentador e confirme a recarga pelo App");
   } else if (key == "RELOAD") {
     if (!awaitingReload) {
-      notifyBLE("ERRO: recarga nao solicitada pelo alimentador.");
+      notifyBLE("ERRO: Recarga não solicitada pelo alimentador");
       return;
     }
     if (!referenceValid || motionInProgress ||
         (rotorPosition != 0 && rotorPosition != PORTIONS_PER_LOAD)) {
-      notifyBLE("ERRO: referencia invalida. Alinhe fisicamente a cavidade vazia e envie SET_HOME.");
+      notifyBLE("ERRO: Referência inválida. Alinhe fisicamente a cavidade vazia e envie SET_HOME");
       return;
     }
     // Refill confirmation only updates the load state. Motor movement is
@@ -1633,12 +1739,14 @@ void handleCommand(String cmd) {
     cancelQueuedPush("EMPTY");
     cancelQueuedPush("EMPTY_REMINDER");
     saveSettings();
-    notifyBLE("OK: recarga confirmada pelo PWA; alimentador pronto.");
+    notifyBLE("OK: Recarga confirmada pelo App. Alimentador pronto");
   } else if (key == "FB_BEGIN") {
     pendingFirebaseProjectId = firebaseProjectId;
+    pendingFirebaseDatabaseUrl = firebaseDatabaseUrl;
     pendingFirebaseClientEmail = firebaseClientEmail;
     pendingFirebasePrivateKey = firebasePrivateKey;
     expectedFirebaseProjectLength = 0;
+    expectedFirebaseDatabaseLength = 0;
     expectedFirebaseEmailLength = 0;
     expectedFirebasePrivateKeyLength = 0;
     firebaseConfigEditing = true;
@@ -1646,7 +1754,7 @@ void handleCommand(String cmd) {
   } else if (key == "PRJ_BEGIN") {
     const long fieldLength = value.toInt();
     if (!firebaseConfigEditing || fieldLength < 6 || fieldLength > 30) {
-      notifyBLE("ERRO: tamanho do ID do projeto invalido.");
+      notifyBLE("ERRO: Tamanho do ID do projeto inválido");
       return;
     }
     expectedFirebaseProjectLength = (size_t)fieldLength;
@@ -1656,7 +1764,7 @@ void handleCommand(String cmd) {
   } else if (key == "PRJ_ADD") {
     if (!firebaseConfigEditing || expectedFirebaseProjectLength == 0 || value.isEmpty() ||
         pendingFirebaseProjectId.length() + value.length() > expectedFirebaseProjectLength) {
-      notifyBLE("ERRO: fragmento do ID do projeto invalido.");
+      notifyBLE("ERRO: Fragmento do ID do projeto inválido");
       return;
     }
     pendingFirebaseProjectId += value;
@@ -1664,28 +1772,57 @@ void handleCommand(String cmd) {
   } else if (key == "PRJ_SAVE") {
     if (!firebaseConfigEditing || expectedFirebaseProjectLength == 0 ||
         pendingFirebaseProjectId.length() != expectedFirebaseProjectLength) {
-      notifyBLE("ERRO: ID do projeto incompleto.");
+      notifyBLE("ERRO: ID do projeto incompleto");
       return;
     }
     if (pendingFirebaseProjectId[0] < 'a' || pendingFirebaseProjectId[0] > 'z' ||
         !((pendingFirebaseProjectId[pendingFirebaseProjectId.length() - 1] >= 'a' && pendingFirebaseProjectId[pendingFirebaseProjectId.length() - 1] <= 'z') ||
           (pendingFirebaseProjectId[pendingFirebaseProjectId.length() - 1] >= '0' && pendingFirebaseProjectId[pendingFirebaseProjectId.length() - 1] <= '9'))) {
-      notifyBLE("ERRO: formato do ID do projeto invalido.");
+      notifyBLE("ERRO: Formato do ID do projeto inválido");
       return;
     }
     for (size_t i = 0; i < pendingFirebaseProjectId.length(); i++) {
       const char c = pendingFirebaseProjectId[i];
       if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) {
-        notifyBLE("ERRO: ID do projeto deve usar letras minusculas, numeros e hifens.");
+        notifyBLE("ERRO: O ID do projeto deve usar letras minúsculas, números e hífens");
         return;
       }
     }
     expectedFirebaseProjectLength = 0;
     notifyBLE("OK: PRJ_SAVE");
+  } else if (key == "DB_BEGIN") {
+    const long fieldLength = value.toInt();
+    if (!firebaseConfigEditing || fieldLength < 30 || fieldLength > 160) {
+      notifyBLE("ERRO: Tamanho da URL do Realtime Database inválido");
+      return;
+    }
+    expectedFirebaseDatabaseLength = (size_t)fieldLength;
+    pendingFirebaseDatabaseUrl = "";
+    pendingFirebaseDatabaseUrl.reserve(expectedFirebaseDatabaseLength + 1);
+    notifyBLE("OK: DB_BEGIN");
+  } else if (key == "DB_ADD") {
+    if (!firebaseConfigEditing || expectedFirebaseDatabaseLength == 0 || value.isEmpty() ||
+        pendingFirebaseDatabaseUrl.length() + value.length() > expectedFirebaseDatabaseLength) {
+      notifyBLE("ERRO: Fragmento da URL do Realtime Database inválido");
+      return;
+    }
+    pendingFirebaseDatabaseUrl += value;
+    notifyBLE("OK: DB_ADD");
+  } else if (key == "DB_SAVE") {
+    if (!firebaseConfigEditing || expectedFirebaseDatabaseLength == 0 ||
+        pendingFirebaseDatabaseUrl.length() != expectedFirebaseDatabaseLength ||
+        !pendingFirebaseDatabaseUrl.startsWith("https://") ||
+        (pendingFirebaseDatabaseUrl.indexOf("firebaseio.com") < 0 && pendingFirebaseDatabaseUrl.indexOf("firebasedatabase.app") < 0) ||
+        pendingFirebaseDatabaseUrl.indexOf(" ") >= 0 || pendingFirebaseDatabaseUrl.endsWith("/")) {
+      notifyBLE("ERRO: URL HTTPS do Realtime Database inválida");
+      return;
+    }
+    expectedFirebaseDatabaseLength = 0;
+    notifyBLE("OK: DB_SAVE");
   } else if (key == "EML_BEGIN") {
     const long fieldLength = value.toInt();
     if (!firebaseConfigEditing || fieldLength < 20 || fieldLength > 160) {
-      notifyBLE("ERRO: tamanho do e-mail invalido.");
+      notifyBLE("ERRO: Tamanho do e-mail inválido");
       return;
     }
     expectedFirebaseEmailLength = (size_t)fieldLength;
@@ -1695,7 +1832,7 @@ void handleCommand(String cmd) {
   } else if (key == "EML_ADD") {
     if (!firebaseConfigEditing || expectedFirebaseEmailLength == 0 || value.isEmpty() ||
         pendingFirebaseClientEmail.length() + value.length() > expectedFirebaseEmailLength) {
-      notifyBLE("ERRO: fragmento do e-mail invalido.");
+      notifyBLE("ERRO: Fragmento do e-mail inválido");
       return;
     }
     pendingFirebaseClientEmail += value;
@@ -1705,7 +1842,7 @@ void handleCommand(String cmd) {
         pendingFirebaseClientEmail.length() != expectedFirebaseEmailLength ||
         pendingFirebaseClientEmail.indexOf('@') <= 0 ||
         !pendingFirebaseClientEmail.endsWith(".iam.gserviceaccount.com")) {
-      notifyBLE("ERRO: e-mail da conta de servico invalido.");
+      notifyBLE("ERRO: E-mail da conta de serviço inválido");
       return;
     }
     expectedFirebaseEmailLength = 0;
@@ -1713,7 +1850,7 @@ void handleCommand(String cmd) {
   } else if (key == "PK_BEGIN") {
     const long keyLength = value.toInt();
     if (!firebaseConfigEditing || keyLength < 300 || keyLength > 1900) {
-      notifyBLE("ERRO: tamanho da chave privada invalido.");
+      notifyBLE("ERRO: Tamanho da chave privada inválido");
       return;
     }
     expectedFirebasePrivateKeyLength = (size_t)keyLength;
@@ -1723,7 +1860,7 @@ void handleCommand(String cmd) {
   } else if (key == "PK_ADD") {
     if (!firebaseConfigEditing || expectedFirebasePrivateKeyLength == 0 || value.isEmpty() ||
         pendingFirebasePrivateKey.length() + value.length() > expectedFirebasePrivateKeyLength) {
-      notifyBLE("ERRO: fragmento da chave privada invalido.");
+      notifyBLE("ERRO: Fragmento da chave privada inválido");
       return;
     }
     pendingFirebasePrivateKey += value;
@@ -1733,21 +1870,22 @@ void handleCommand(String cmd) {
         pendingFirebasePrivateKey.length() != expectedFirebasePrivateKeyLength ||
         pendingFirebasePrivateKey.indexOf("-----BEGIN PRIVATE KEY-----") < 0 ||
         pendingFirebasePrivateKey.indexOf("-----END PRIVATE KEY-----") < 0) {
-      notifyBLE("ERRO: chave privada incompleta ou formato invalido.");
+      notifyBLE("ERRO: Chave privada incompleta ou formato inválido");
       return;
     }
     expectedFirebasePrivateKeyLength = 0;
     notifyBLE("OK: PK_SAVE");
   } else if (key == "FB_SAVE") {
-    if (!firebaseConfigEditing || pendingFirebaseProjectId.isEmpty() ||
+    if (!firebaseConfigEditing || pendingFirebaseProjectId.isEmpty() || pendingFirebaseDatabaseUrl.isEmpty() ||
         pendingFirebaseClientEmail.isEmpty() ||
         pendingFirebasePrivateKey.indexOf("-----BEGIN PRIVATE KEY-----") < 0 ||
         pendingFirebasePrivateKey.indexOf("-----END PRIVATE KEY-----") < 0) {
-      notifyBLE("ERRO: credenciais Firebase incompletas.");
+      notifyBLE("ERRO: Credenciais Firebase incompletas");
       return;
     }
     size_t freeEntriesBefore = prefs.freeEntries();
     size_t projectWritten = prefs.putString("fbProject", pendingFirebaseProjectId);
+    size_t databaseWritten = prefs.putString("fbRtdb", pendingFirebaseDatabaseUrl);
     size_t emailWritten = prefs.putString("fbEmail", pendingFirebaseClientEmail);
     size_t keySize = pendingFirebasePrivateKey.length() + 1;
     size_t keyWritten = prefs.putBytes("fbKeyBin", pendingFirebasePrivateKey.c_str(), keySize);
@@ -1762,7 +1900,8 @@ void handleCommand(String cmd) {
       free(savedKeyBuffer);
     }
     if (!projectWritten || !emailWritten || !keyWritten ||
-        savedProject != pendingFirebaseProjectId ||
+        savedProject != pendingFirebaseProjectId || databaseWritten != pendingFirebaseDatabaseUrl.length() ||
+        prefs.getString("fbRtdb", "") != pendingFirebaseDatabaseUrl ||
         savedEmail != pendingFirebaseClientEmail ||
         !savedKeyMatches) {
       notifyBLE(String("ERRO: NVS Firebase; gravado=") + projectWritten + "," + emailWritten + "," + keyWritten +
@@ -1773,6 +1912,7 @@ void handleCommand(String cmd) {
     }
     prefs.remove("fbKey");
     firebaseProjectId = pendingFirebaseProjectId;
+    firebaseDatabaseUrl = pendingFirebaseDatabaseUrl;
     firebaseClientEmail = pendingFirebaseClientEmail;
     firebasePrivateKey = pendingFirebasePrivateKey;
     oauthAccessToken = "";
@@ -1781,50 +1921,51 @@ void handleCommand(String cmd) {
     pendingFirebaseProjectId = "";
     pendingFirebaseClientEmail = "";
     pendingFirebasePrivateKey = "";
-    notifyBLE("OK: credenciais Firebase salvas.");
+    nextRealtimeUploadAt = 0;
+    notifyBLE("OK: Credenciais Firebase salvas");
     if (pushDeliveryConfigured()) {
-      queuePush("CONFIGURED_TEST", "Notificações configuradas!");
+      queuePush("CONFIGURED_TEST", "Notificações configuradas");
     } else {
       notifyPushLog("teste de confirmacao ignorado: destino FCM ainda nao configurado");
     }
   } else if (key == "CAL_STEPS") {
     int n = value.toInt();
-    if (n < 3900 || n > 4200) { notifyBLE("ERRO: CAL_STEPS aceita 3900..4200."); return; }
+    if (n < 3900 || n > 4200) { notifyBLE("ERRO: CAL_STEPS aceita 3900..4200"); return; }
     halfStepsPerRev = (uint16_t)n;
     referenceValid = false; // require physical alignment after recalibration
     saveSettings();
-    notifyBLE("OK: calibracao salva. Confira posicao e envie SET_HOME.");
+    notifyBLE("OK: Calibração salva. Confira a posição e envie SET_HOME");
   } else if (key == "FCM_CLEAR") {
     const uint8_t removedCount = fcmTargetCount;
     if (!clearFcmDevices()) {
       notifyPushLog("falha ao limpar destinos FCM da NVS");
-      notifyBLE("ERRO: falha ao limpar dispositivos FCM na NVS");
+      notifyBLE("ERRO: Falha ao limpar dispositivos FCM na NVS");
       return;
     }
     notifyPushLog(String("destinos FCM removidos: ") + removedCount + "; credenciais Firebase mantidas");
-    notifyBLE("OK: dispositivos FCM removidos");
+    notifyBLE("OK: Dispositivos FCM removidos");
   } else if (key == "FCM_BEGIN" || key == "FCM_REMOVE_BEGIN") {
     int n = value.toInt();
-    if (n < 50 || n > 512) { notifyBLE("ERRO: comprimento FCM invalido"); return; }
+    if (n < 50 || n > 512) { notifyBLE("ERRO: Comprimento FCM inválido"); return; }
     pendingFcmToken = ""; pendingFcmToken.reserve(n + 1);
     expectedFcmLength = n;
     pendingFcmRemoval = key == "FCM_REMOVE_BEGIN";
     notifyPushLog(String(pendingFcmRemoval ? "recebendo remocao de dispositivo; tamanho=" : "recebendo registro de dispositivo; tamanho=") + n);
     notifyBLE(pendingFcmRemoval ? "OK: FCM_REMOVE_BEGIN" : "OK: FCM_BEGIN");
   } else if (key == "FCM_ADD" || key == "FCM_REMOVE_ADD") {
-    if ((key == "FCM_REMOVE_ADD") != pendingFcmRemoval) { notifyBLE("ERRO: operacao FCM invalida"); return; }
+    if ((key == "FCM_REMOVE_ADD") != pendingFcmRemoval) { notifyBLE("ERRO: Operação FCM inválida"); return; }
     if (expectedFcmLength == 0 || value.isEmpty() ||
         pendingFcmToken.length() + value.length() > expectedFcmLength) {
       notifyPushLog(String("fragmento invalido: recebido=") + pendingFcmToken.length() +
                     ", fragmento=" + value.length() + ", esperado=" + expectedFcmLength);
-      notifyBLE("ERRO: fragmento FCM invalido"); return;
+      notifyBLE("ERRO: Fragmento FCM inválido"); return;
     }
     pendingFcmToken += value;
     // Confirma cada fragmento para o PWA aguardar o processamento no loop antes
     // de enviar o proximo; a resposta do GATT so confirma a escrita BLE.
     notifyBLE("OK: FCM_ADD");
   } else if (key == "FCM_SAVE" || key == "FCM_REMOVE") {
-    if ((key == "FCM_REMOVE") != pendingFcmRemoval) { notifyBLE("ERRO: operacao FCM invalida"); return; }
+    if ((key == "FCM_REMOVE") != pendingFcmRemoval) { notifyBLE("ERRO: Operação FCM inválida"); return; }
     if (expectedFcmLength == 0 || pendingFcmToken.length() != expectedFcmLength) {
       notifyPushLog(String("FCM incompleto: recebido=") + pendingFcmToken.length() +
                     ", esperado=" + expectedFcmLength);
@@ -1834,41 +1975,41 @@ void handleCommand(String cmd) {
       bool wasPresent = false;
       for (uint8_t i = 0; i < fcmTargetCount; i++) if (fcmTargetTokens[i] == pendingFcmToken) wasPresent = true;
       if (!removeFcmToken(pendingFcmToken)) {
-        notifyBLE("ERRO: falha ao remover dispositivo FCM");
+        notifyBLE("ERRO: Falha ao remover dispositivo FCM");
         pendingFcmToken = ""; expectedFcmLength = 0; pendingFcmRemoval = false;
         return;
       }
       notifyPushLog(String(wasPresent ? "dispositivo FCM removido; restantes=" : "dispositivo FCM ja ausente; restantes=") + fcmTargetCount);
       clearFirebaseCredentialsIfNoDevices();
       pendingFcmToken = ""; expectedFcmLength = 0; pendingFcmRemoval = false;
-      notifyBLE("OK: dispositivo FCM removido");
+    notifyBLE("OK: Dispositivo FCM removido");
       return;
     }
     if (!upsertFcmToken(pendingFcmToken)) {
       if (fcmTargetCount >= FCM_DEVICE_CAPACITY) {
         notifyPushLog(String("registro FCM recusado: limite atingido; dispositivos=") +
                       fcmTargetCount + "/" + FCM_DEVICE_CAPACITY);
-        notifyBLE(String("ERRO: limite de dispositivos FCM atingido (") +
+        notifyBLE(String("ERRO: Limite de dispositivos FCM atingido (") +
                   FCM_DEVICE_CAPACITY + ")");
       } else {
         notifyPushLog(String("registro FCM falhou ao gravar na NVS; dispositivos=") +
                       fcmTargetCount + "/" + FCM_DEVICE_CAPACITY);
-        notifyBLE("ERRO: falha ao gravar dispositivo FCM na NVS");
+        notifyBLE("ERRO: Falha ao gravar dispositivo FCM na NVS");
       }
       pendingFcmToken = ""; expectedFcmLength = 0;
       return;
     }
     pendingFcmToken = ""; expectedFcmLength = 0; pendingFcmRemoval = false;
     notifyPushLog(String("dispositivo FCM salvo; total=") + fcmTargetCount);
-    notifyBLE("OK: destino FCM salvo");
+    notifyBLE("OK: Destino FCM salvo");
   } else if (key == "FCM_TEST") {
     notifyPushLog("comando FCM_TEST recebido");
     if (!pushDeliveryConfigured()) {
-      notifyBLE("ERRO: configure o Firebase e ative notificacoes no PWA antes do teste.");
+      notifyBLE("ERRO: Configure o Firebase e ative notificações no App antes do teste");
       return;
     }
-    queuePush("TEST", "Teste de notificacao do BettaFeeder.");
-    notifyBLE("OK: teste de push enfileirado");
+    queuePush("TEST", "Teste de Notificação do BettaFeeder");
+    notifyBLE("OK: Teste de push enfileirado");
   } else if (key == "CLEAR_WIFI") {
     wifiSSID = "";
     wifiPASS = "";
@@ -1877,9 +2018,9 @@ void handleCommand(String cmd) {
     WiFi.disconnect(true);
     wifiConnecting = false;
     ntpConfigured = false;
-    notifyBLE("OK: dados Wi-Fi apagados.");
+    notifyBLE("OK: Dados Wi-Fi apagados");
   } else {
-    notifyBLE("ERRO: comando desconhecido. Use STATUS, FEED, JOG_LEFT, JOG_RIGHT, TIMES, TEST_MODE=ON/OFF, SET_HOME, RELOAD, FCM_*, FB_BEGIN, PRJ_*, EML_*, PK_*, FB_SAVE, BLE_ON.");
+    notifyBLE("ERRO: Comando desconhecido. Use STATUS, FEED, JOG_LEFT, JOG_RIGHT, TIMES, TEST_MODE=ON/OFF, SET_HOME, RELOAD, FCM_*, FB_BEGIN, PRJ_*, EML_*, PK_*, FB_SAVE, BLE_ON");
   }
 }
 
@@ -1902,7 +2043,7 @@ void processSerialCommands() {
 
 bool isFirebaseConfigCommand(const char* command) {
   return strncmp(command, "FB_", 3) == 0 || strncmp(command, "FCM_", 4) == 0 ||
-    strncmp(command, "PRJ_", 4) == 0 || strncmp(command, "EML_", 4) == 0 ||
+    strncmp(command, "PRJ_", 4) == 0 || strncmp(command, "DB_", 3) == 0 || strncmp(command, "EML_", 4) == 0 ||
     strncmp(command, "PK_", 3) == 0;
 }
 
@@ -1911,6 +2052,7 @@ void pushWorkerTask(void*) {
     pushNetworkBusy = true;
     processPush();
     processFcmMaintenance();
+    processRealtimeDatabase();
     pushNetworkBusy = false;
     vTaskDelay(pdMS_TO_TICKS(20));
   }
@@ -1998,6 +2140,7 @@ void startBLE() {
 void setup() {
   Serial.begin(115200);
   pushQueueMutex = xSemaphoreCreateMutex();
+  if (!pushQueueMutex) Serial.println("Push queue indisponivel: sem memoria para criar o mutex");
 
   // O projeto usa somente BLE. Liberar a memoria reservada ao Bluetooth
   // Classic aumenta a heap disponivel para o handshake TLS do FCM/OAuth.
@@ -2025,7 +2168,7 @@ void setup() {
     motorTestMode = false;
     motorTestNextEpoch = 0;
     saveSettings();
-    saveDeviceLog("Teste do motor interrompido por reinicializacao; porcoes ja executadas permanecem contabilizadas.");
+    saveDeviceLog("Teste do motor interrompido por reinicialização; porções já executadas permanecem contabilizadas.");
   }
 
   WiFi.mode(WIFI_STA);
@@ -2034,14 +2177,14 @@ void setup() {
   startBLE();
 
   notifyBLE(referenceValid
-    ? "BettaFeeder V6: posicao salva restaurada sem mover o motor."
-    : "BettaFeeder V6: alinhe a cavidade vazia e use SET_HOME; o motor permanece parado.");
+    ? "BettaFeeder V6: Posição salva restaurada sem mover o motor"
+    : "BettaFeeder V6: Alinhe a cavidade vazia e use SET_HOME; o motor permanece parado");
   if (motionInProgress) {
     referenceValid = false;
     appendFeedHistory(false, "movement_interrupted", portionsDispensed < PORTIONS_PER_LOAD ? portionsDispensed + 1 : 0);
     motionInProgress = false;
     saveSettings();
-    const String motionAlert = "Energia interrompida durante movimento do motor. Verifique o rotor e defina novamente a posicao inicial.";
+    const String motionAlert = "Energia interrompida durante movimento do motor. Verifique o rotor e defina novamente a posição inicial";
     notifyBLE(String("ALERTA: ") + motionAlert);
     queuePush("MOVIMENTO_INTERROMPIDO", motionAlert);
     saveDeviceLog(motionAlert);
@@ -2096,6 +2239,7 @@ void loop() {
     pushNetworkBusy = true;
     processPush();
     processFcmMaintenance();
+    processRealtimeDatabase();
     pushNetworkBusy = false;
   }
 

@@ -7,11 +7,13 @@ const BLE = {
 
 const $ = (id) => document.getElementById(id)
 const encoder = new TextEncoder()
-const decoder = new TextDecoder()
+const bleDecoder = new TextDecoder()
+const serialDecoder = new TextDecoder()
 const BLE_COMMAND_TIMEOUT_MS = 15000
+const MAX_PROTOCOL_MESSAGE_LENGTH = 8192
 
 const firmwareFieldIds = [
-	'ssid', 'feed1', 'feed2', 'firebaseProjectId', 'firebaseClientEmail',
+	'ssid', 'feed1', 'feed2', 'firebaseProjectId', 'firebaseDatabaseUrl', 'firebaseClientEmail',
 	'wifiStatus', 'clockStatus', 'portionsStatus', 'temperatureStatus',
 	'batchStatus', 'pushState', 'firebaseConfigState'
 ]
@@ -32,9 +34,16 @@ let serialReadBuffer = ''
 let toastTimer = null
 let connectionInProgress = false
 let firebaseConfigFieldsEdited = false
+const realtimeDatabaseUrlKey = 'bettafeeder-realtime-database-url'
+let realtimeDatabaseRef = null
+let realtimeDatabaseListener = null
+let realtimeDatabaseLastError = ''
+const displayedRealtimeLogKeys = new Set()
 let commandWriteQueue = Promise.resolve()
+let commandResponseQueue = Promise.resolve()
 let rxFragments = ''
 let statusRefreshTimer = null
+let statusRequestInFlight = false
 let feedReferenceReady = false
 let feedTimesReceived = false
 let reloadWaitingForRefill = false
@@ -85,16 +94,16 @@ function updateMotorTestControls() {
 	$('reloadButton').disabled = motorTestActive || !(isConnected() && feedReferenceReady && reloadWaitingForRefill)
 	$('motorTestBanner').hidden = !motorTestActive
 	if (motorTestActive) {
-		$('motorTestBanner').textContent = `MODO TESTE ATIVO · Proximo disparo ${motorTestNextEpoch ? new Date(motorTestNextEpoch * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }) : 'em calculo'} · ${motorTestShots}/9 nesta ativacao. O historico desde a recarga tambem pode incluir alimentacoes anteriores a esta ativacao. Cada disparo de teste conta como porcao.`
+		$('motorTestBanner').textContent = `MODO TESTE ATIVO · Próximo disparo ${motorTestNextEpoch ? new Date(motorTestNextEpoch * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }) : 'em cálculo'} · ${motorTestShots}/9 nesta ativação. O histórico desde a recarga também pode incluir alimentações anteriores a esta ativação. Cada disparo de teste conta como porção.`
 	}
 	const nextTime = motorTestNextEpoch
 		? new Date(motorTestNextEpoch * 1000).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })
 		: ''
 	if (!isConnected()) $('motorTestStatus').textContent = 'Conecte ao BettaFeeder para controlar o modo teste.'
-	else if (!motorTestSupported) $('motorTestStatus').textContent = 'O firmware conectado nao oferece modo teste.'
-	else if (motorTestActive) $('motorTestStatus').textContent = `Ativo · disparo ${Math.min(motorTestShots + 1, 9)}/9 nesta ativacao${nextTime ? ` · proximo: ${nextTime}` : ''}`
-	else if (motorTestShots >= 9) $('motorTestStatus').textContent = 'Concluido. Antes de abastecer racao real, alinhe o rotor e use Definir posição inicial para zerar a contagem.'
-	else if (motorTestShots > 0) $('motorTestStatus').textContent = 'Cancelado; disparos contam como porcoes. Antes de abastecer, alinhe o rotor e use Definir posição inicial.'
+	else if (!motorTestSupported) $('motorTestStatus').textContent = 'O firmware conectado não oferece modo teste.'
+	else if (motorTestActive) $('motorTestStatus').textContent = `Ativo · disparo ${Math.min(motorTestShots + 1, 9)}/9 nesta ativação${nextTime ? ` · próximo: ${nextTime}` : ''}`
+	else if (motorTestShots >= 9) $('motorTestStatus').textContent = 'Concluído. Antes de abastecer ração real, alinhe o rotor e use Definir posição inicial para zerar a contagem.'
+	else if (motorTestShots > 0) $('motorTestStatus').textContent = 'Cancelado; disparos contam como porções. Antes de abastecer, alinhe o rotor e use Definir posição inicial.'
 	else if (!feedReferenceReady) $('motorTestStatus').textContent = 'Passo 1: alinhe a cavidade vazia com a saída e clique em “Definir posição inicial”. Passo 2: confirme a recarga no PWA para liberar 9 porções lógicas.'
 	else if (reloadWaitingForRefill) $('motorTestStatus').textContent = 'Posição inicial definida. Confirme a recarga no PWA para liberar 9 porções lógicas.'
 	else if (!testPortionsAvailable) $('motorTestStatus').textContent = 'São necessárias pelo menos 9 porções lógicas disponíveis para iniciar o modo teste.'
@@ -171,8 +180,9 @@ function alertIfFirebaseSetupIncomplete(deviceFirebaseState) {
 $('firebaseSetupDismiss').addEventListener('click', () => $('firebaseSetupDialog').close())
 
 function waitForBleResponse(predicate, timeoutMs = 5000, commandLabel = '') {
-	return new Promise((resolve, reject) => {
-		const waiter = { predicate, resolve, reject, timer: null }
+	let waiter
+	const promise = new Promise((resolve, reject) => {
+		waiter = { predicate, resolve, reject, timer: null }
 		waiter.timer = setTimeout(() => {
 			const index = bleResponseWaiters.indexOf(waiter)
 			if (index >= 0) bleResponseWaiters.splice(index, 1)
@@ -180,6 +190,14 @@ function waitForBleResponse(predicate, timeoutMs = 5000, commandLabel = '') {
 		}, timeoutMs)
 		bleResponseWaiters.push(waiter)
 	})
+	return {
+		promise,
+		cancel() {
+			const index = bleResponseWaiters.indexOf(waiter)
+			if (index >= 0) bleResponseWaiters.splice(index, 1)
+			clearTimeout(waiter.timer)
+		}
+	}
 }
 
 function resolveBleResponse(message) {
@@ -193,13 +211,40 @@ function resolveBleResponse(message) {
 	}
 }
 
+function rejectPendingBleResponses(reason) {
+	const waiters = bleResponseWaiters.splice(0)
+	rxFragments = ''
+	bleDecoder.decode()
+	for (const waiter of waiters) {
+		clearTimeout(waiter.timer)
+		waiter.reject(new Error(reason))
+	}
+}
+
 async function sendCommandAndWait(command, predicate, timeoutMs = 5000) {
-	const commandLabel = command.includes('=') ? command.slice(0, command.indexOf('=')) : command
-	const responsePromise = waitForBleResponse(predicate, timeoutMs, commandLabel)
-	await sendCommand(command)
-	const response = await responsePromise
-	if (response.startsWith('ERRO:')) throw new Error(`ESP32: ${response}`)
-	return response
+	const transaction = commandResponseQueue.then(async () => {
+		const commandLabel = command.includes('=') ? command.slice(0, command.indexOf('=')) : command
+		const responseWaiter = waitForBleResponse(predicate, timeoutMs, commandLabel)
+		try {
+			await sendCommand(command)
+		} catch (error) {
+			responseWaiter.cancel()
+			throw error
+		}
+		const response = await responseWaiter.promise
+		if (response.startsWith('ERRO:')) throw new Error(`ESP32: ${response}`)
+		return response
+	})
+	commandResponseQueue = transaction.catch(() => { })
+	return transaction
+}
+
+function refreshDeviceStatus() {
+	if (statusRequestInFlight) return Promise.resolve()
+	statusRequestInFlight = true
+	return sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000).catch(error => {
+		console.warn('Falha ao atualizar status:', error)
+	}).finally(() => { statusRequestInFlight = false })
 }
 
 function errorMessage(error, fallback = 'Ocorreu um erro ao conectar ao Bluetooth.') {
@@ -259,6 +304,7 @@ function setConnected(connected, name = 'BettaFeeder') {
 	$('togglePassword').disabled = !connected
 	$('pushTest').disabled = !connected
 	$('firebaseProjectId').disabled = !connected
+	$('firebaseDatabaseUrl').disabled = !connected
 	$('firebaseClientEmail').disabled = !connected
 	$('firebasePrivateKey').disabled = !connected
 	$('saveFirebaseConfigButton').disabled = !connected || $('saveFirebaseConfigButton').classList.contains('is-loading')
@@ -280,7 +326,7 @@ function setConnected(connected, name = 'BettaFeeder') {
 	clearInterval(statusRefreshTimer)
 	statusRefreshTimer = connected ? setInterval(() => {
 		if (!connectionInProgress && isConnected() && hasCommandTransport()) {
-			sendCommand('STATUS', true).catch(error => console.warn('Falha ao atualizar status:', error))
+			void refreshDeviceStatus()
 		}
 	}, 10000) : null
 }
@@ -380,7 +426,7 @@ function parseDeviceMessage(message) {
 		motorTestShots = Number(motorTestState[2])
 		if (!motorTestActive) {
 			motorTestNextEpoch = 0
-			sendCommand('STATUS', true).catch(() => {})
+			void refreshDeviceStatus()
 		}
 		updateMotorTestControls()
 		updateFeedButtonAvailability()
@@ -501,12 +547,17 @@ function parseDeviceMessage(message) {
 		$('pushState').textContent = 'Destino no ESP32: ' + (pushLabels[fields.push] || 'Estado desconhecido')
 	}
 	if (fields.firebase) {
-		$('firebaseConfigState').textContent = fields.firebase === 'configurado'
-			? 'Credenciais FCM configuradas no ESP32.'
-			: 'Credenciais FCM ainda não configuradas no ESP32.'
+		const fcmStatus = fields.firebase === 'configurado' ? 'FCM configurado' : 'FCM não configurado'
+		const databaseStatus = fields.rtdb === 'configurado' ? 'Realtime Database configurado' : 'Realtime Database pendente'
+		$('firebaseConfigState').textContent = `${fcmStatus} · ${databaseStatus}.`
 	}
 	if (!firebaseConfigFieldsEdited && Object.hasOwn(fields, 'fb_project')) {
 		$('firebaseProjectId').value = fields.fb_project
+	}
+	if (!firebaseConfigFieldsEdited && Object.hasOwn(fields, 'fb_rtdb')) $('firebaseDatabaseUrl').value = fields.fb_rtdb
+	if (fields.fb_rtdb) {
+		try { localStorage.setItem(realtimeDatabaseUrlKey, fields.fb_rtdb) } catch (_) { }
+		startRealtimeDatabaseListener(fields.fb_rtdb)
 	}
 	if (!firebaseConfigFieldsEdited && Object.hasOwn(fields, 'fb_email')) {
 		$('firebaseClientEmail').value = fields.fb_email
@@ -529,19 +580,28 @@ function parseDeviceMessage(message) {
 
 function onNotification(event) {
 	const value = event.target.value
-	const message = decoder.decode(value)
-	if (message.startsWith('+')) {
-		rxFragments += message.slice(1)
+	const prefix = value.byteLength ? value.getUint8(0) : 0
+	if (prefix === 43 || prefix === 61) {
+		const isFinalFragment = prefix === 61
+		const bytes = new Uint8Array(value.buffer, value.byteOffset + 1, value.byteLength - 1)
+		const fragment = bleDecoder.decode(bytes, { stream: true })
+		if (rxFragments.length + fragment.length > MAX_PROTOCOL_MESSAGE_LENGTH) {
+			rxFragments = ''
+			bleDecoder.decode()
+			console.warn('Mensagem BLE descartada: excedeu o limite de tamanho')
+			return
+		}
+		rxFragments += fragment
+		if (isFinalFragment) {
+			const completeMessage = rxFragments + bleDecoder.decode()
+			rxFragments = ''
+			parseDeviceMessage(completeMessage)
+		}
 		return
 	}
-	if (message.startsWith('=')) {
-		rxFragments += message.slice(1)
-		parseDeviceMessage(rxFragments)
-		rxFragments = ''
-		return
-	}
+	bleDecoder.decode()
 	rxFragments = ''
-	message.split(/\r?\n/).filter(Boolean).forEach(parseDeviceMessage)
+	bleDecoder.decode(value).split(/\r?\n/).filter(Boolean).forEach(parseDeviceMessage)
 }
 
 async function connect() {
@@ -611,7 +671,7 @@ async function connectSerial() {
 	}
 }
 
-async function attachSerialPort(port, verifyDevice = false) {
+async function attachSerialPort(port) {
 	serialPort = port
 	await serialPort.open({ baudRate: 115200 })
 	serialConnected = true
@@ -620,11 +680,7 @@ async function attachSerialPort(port, verifyDevice = false) {
 	$('serialConnectButton').querySelector('.serial-button-label').textContent = 'Desconectar USB Serial'
 	log('Serial conectada; Bluetooth permanece ativo.', 'success')
 	void readSerialLoop()
-	if (verifyDevice) {
-		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
-	} else {
-		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
-	}
+	await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
 	await sendCommandAndWait('LOGS', message => message === 'LOGS_DONE', 15000)
 	await requestFeedingHistory()
 	void syncPushAuthorization()
@@ -641,7 +697,7 @@ async function reconnectAuthorizedSerial() {
 	try {
 		for (const port of ports) {
 			try {
-				await attachSerialPort(port, true)
+				await attachSerialPort(port)
 				log('Porta USB Serial autorizada reconectada automaticamente.', 'success')
 				return
 			} catch (error) {
@@ -672,9 +728,13 @@ async function readSerialLoop() {
 				const { value, done } = await reader.read()
 				if (done) break
 				if (!value) continue
-				serialReadBuffer += decoder.decode(value, { stream: true })
+				serialReadBuffer += serialDecoder.decode(value, { stream: true })
 				const lines = serialReadBuffer.split(/\r?\n/)
 				serialReadBuffer = lines.pop() || ''
+				if (serialReadBuffer.length > MAX_PROTOCOL_MESSAGE_LENGTH) {
+					serialReadBuffer = ''
+					console.warn('Linha serial descartada: excedeu o limite de tamanho')
+				}
 				lines.filter(Boolean).forEach(parseDeviceMessage)
 			}
 		} catch (error) {
@@ -688,6 +748,7 @@ async function readSerialLoop() {
 }
 
 function onDisconnected() {
+	rejectPendingBleResponses('Conexão encerrada antes da resposta do ESP32.')
 	rxCharacteristic = null
 	txCharacteristic = null
 	server = null
@@ -698,6 +759,9 @@ function onDisconnected() {
 }
 
 function onSerialDisconnected() {
+	rejectPendingBleResponses('Conexão serial encerrada antes da resposta do ESP32.')
+	serialDecoder.decode()
+	serialReadBuffer = ''
 	serialConnected = false
 	serialWriter = null
 	serialPort = null
@@ -773,7 +837,7 @@ $('saveTimesButton').addEventListener('click', () => guarded(async () => {
 	if (first === second) throw new Error('Os horários precisam ser diferentes.')
 	await sendCommandAndWait(
 		`TIMES=${first},${second}`,
-		message => message.startsWith('OK: horarios salvos=') || message.startsWith('ERRO:')
+		message => /^OK: Horários salvos=/i.test(message) || message.startsWith('ERRO:')
 	)
 	await requestFeedingHistory()
 	toast('Horários enviados ao ESP32')
@@ -798,7 +862,7 @@ $('motorTestToggle').addEventListener('change', () => guarded(async () => {
 		motorTestNextEpoch = Number(result[3])
 		updateMotorTestControls()
 		updateFeedButtonAvailability()
-		if (!motorTestActive) sendCommand('STATUS', true).catch(error => log(`Falha ao atualizar o estado: ${error?.message || error}`, 'error'))
+		if (!motorTestActive) await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
 		toast(motorTestActive ? 'Modo teste iniciado' : 'Modo teste interrompido')
 	} catch (error) {
 		motorTestActive = !requestedActive
@@ -814,9 +878,9 @@ $('wifiForm').addEventListener('submit', event => guarded(async () => {
 	if (!ssid) throw new Error('Informe o nome da rede Wi-Fi.')
 	if (!password) throw new Error('Informe a senha do Wi-Fi.')
 	// The SSID and password are sent as two distinct BLE writes.
-	await sendCommand(`SSID=${ssid}`)
+	await sendCommandAndWait('SSID=' + ssid, message => message === 'OK: SSID salvo. Conectando ao Wi-Fi' || message.startsWith('ERRO:'))
 	await new Promise(resolve => setTimeout(resolve, 250))
-	await sendCommand(`PASS=${password}`)
+	await sendCommandAndWait('PASS=' + password, message => message === 'OK: Senha Wi-Fi salva' || message.startsWith('ERRO:'))
 	$('password').value = ''
 	toast('Dados do Wi-Fi enviados')
 }))
@@ -835,13 +899,14 @@ $('firebasePrivateKey').addEventListener('paste', event => {
 	)
 })
 
-for (const id of ['firebaseProjectId', 'firebaseClientEmail', 'firebasePrivateKey']) {
+for (const id of ['firebaseProjectId', 'firebaseDatabaseUrl', 'firebaseClientEmail', 'firebasePrivateKey']) {
 	$(id).addEventListener('input', () => { firebaseConfigFieldsEdited = true })
 }
 
 $('firebaseConfigForm').addEventListener('submit', event => guarded(async () => {
 	event.preventDefault()
 	const projectId = $('firebaseProjectId').value.trim()
+	const databaseUrl = $('firebaseDatabaseUrl').value.trim().replace(/\/$/, '')
 	const clientEmail = $('firebaseClientEmail').value.trim()
 	const privateKeyInput = $('firebasePrivateKey').value.trim()
 	if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(projectId)) {
@@ -849,6 +914,13 @@ $('firebaseConfigForm').addEventListener('submit', event => guarded(async () => 
 	}
 	if (!clientEmail.endsWith('.iam.gserviceaccount.com')) {
 		throw new Error('Informe o e-mail de uma conta de serviço Firebase.')
+	}
+	let parsedDatabaseUrl
+	try { parsedDatabaseUrl = new URL(databaseUrl) } catch (_) { throw new Error('Informe a URL HTTPS do Realtime Database.') }
+	if (parsedDatabaseUrl.protocol !== 'https:' || parsedDatabaseUrl.username || parsedDatabaseUrl.password ||
+		parsedDatabaseUrl.pathname !== '/' || parsedDatabaseUrl.search || parsedDatabaseUrl.hash ||
+		!/^[a-z0-9-]+\.(?:firebaseio\.com|firebasedatabase\.app)$/.test(parsedDatabaseUrl.hostname)) {
+		throw new Error('Informe a URL base HTTPS do Firebase Realtime Database, sem caminho adicional.')
 	}
 	let privateKey = ''
 	if (privateKeyInput) {
@@ -886,6 +958,7 @@ $('firebaseConfigForm').addEventListener('submit', event => guarded(async () => 
 			await sendCommandAndWait(save, message => message === `OK: ${save}` || message.startsWith('ERRO:'), BLE_COMMAND_TIMEOUT_MS)
 		}
 		await sendFragmentedField('PRJ_BEGIN', 'PRJ_ADD', 'PRJ_SAVE', projectId)
+		await sendFragmentedField('DB_BEGIN', 'DB_ADD', 'DB_SAVE', databaseUrl)
 		await sendFragmentedField('EML_BEGIN', 'EML_ADD', 'EML_SAVE', clientEmail)
 		if (privateKey) {
 			await sendCommandAndWait(`PK_BEGIN=${privateKey.length}`, message => message === 'OK: PK_BEGIN' || message.startsWith('ERRO:'), BLE_COMMAND_TIMEOUT_MS)
@@ -898,11 +971,12 @@ $('firebaseConfigForm').addEventListener('submit', event => guarded(async () => 
 			}
 			await sendCommandAndWait('PK_SAVE', message => message === 'OK: PK_SAVE' || message.startsWith('ERRO:'), BLE_COMMAND_TIMEOUT_MS)
 		}
-		await sendCommandAndWait('FB_SAVE', message => message === 'OK: credenciais Firebase salvas.' || message.startsWith('ERRO:'), BLE_COMMAND_TIMEOUT_MS)
+		await sendCommandAndWait('FB_SAVE', message => message === 'OK: Credenciais Firebase salvas' || message.startsWith('ERRO:'), BLE_COMMAND_TIMEOUT_MS)
 		firebaseConfigFieldsEdited = false
+		try { localStorage.setItem(realtimeDatabaseUrlKey, databaseUrl) } catch (_) { }
 		$('firebasePrivateKey').value = ''
 		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
-		$('firebaseConfigState').textContent = 'Credenciais FCM salvas no ESP32.'
+		$('firebaseConfigState').textContent = 'Configuração Firebase e URL do Realtime Database salvas no ESP32.'
 		toast('Credenciais Firebase enviadas')
 	} finally {
 		button.classList.remove('is-loading')
@@ -919,7 +993,7 @@ $('togglePassword').addEventListener('click', () => {
 	$('togglePassword').textContent = visible ? 'Ocultar' : 'Mostrar'
 })
 
-$('statusButton').addEventListener('click', () => guarded(() => sendCommand('STATUS')))
+$('statusButton').addEventListener('click', () => guarded(() => sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)))
 $('testFeedButton').addEventListener('click', () => guarded(async () => {
 	if (!await confirmAction('Confirmar alimentação', 'Alimentar agora? O motor vai liberar uma porção imediatamente.')) return
 	const button = $('testFeedButton')
@@ -989,7 +1063,7 @@ $('reloadButton').addEventListener('click', () => guarded(async () => {
 	try {
 		await sendCommandAndWait(
 			'RELOAD',
-			message => message === 'OK: recarga confirmada pelo PWA; alimentador pronto.' || message.startsWith('ERRO:'),
+			message => message === 'OK: Recarga confirmada pelo App. Alimentador pronto' || message.startsWith('ERRO:'),
 			15000
 		)
 		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
@@ -1016,7 +1090,7 @@ if ('serviceWorker' in navigator && window.isSecureContext) {
 
 		navigator.serviceWorker.register('./sw.js').then(registration => {
 			const checkForUpdates = () => registration.update().catch(err => {
-				console.warn('Falha ao verificar atualizaÃ§Ãµes do PWA:', err)
+				console.warn('Falha ao verificar atualizações do PWA:', err)
 			})
 
 			void checkForUpdates()
@@ -1031,6 +1105,14 @@ if ('serviceWorker' in navigator && window.isSecureContext) {
 }
 
 window.addEventListener('load', () => {
+	let savedDatabaseUrl = window.BETTA_FIREBASE_CONFIG?.databaseURL || ''
+	try { savedDatabaseUrl ||= localStorage.getItem(realtimeDatabaseUrlKey) || '' } catch (_) { }
+	if (window.BETTA_FIREBASE_CONFIG?.projectId) $('firebaseProjectId').value = window.BETTA_FIREBASE_CONFIG.projectId
+	if (savedDatabaseUrl) {
+		$('firebaseDatabaseUrl').value = savedDatabaseUrl
+		startRealtimeDatabaseListener(savedDatabaseUrl)
+	}
+	else $('cloudDataStatus').textContent = 'Conecte ao alimentador uma vez para carregar a URL do banco e sincronizar os dados.'
 	if ('serial' in navigator) {
 		void reconnectAuthorizedSerial()
 		navigator.serial.addEventListener('connect', () => { void reconnectAuthorizedSerial() })
@@ -1059,6 +1141,103 @@ function firebaseWebConfigured() {
 	return config && config.apiKey && config.apiKey !== 'COLOQUE_WEB_API_KEY' &&
 		config.vapidKey && config.vapidKey !== 'COLOQUE_VAPID_PUBLICA' &&
 		config.messagingSenderId && config.messagingSenderId !== 'COLOQUE_MESSAGING_SENDER_ID'
+}
+
+function isValidRealtimeDatabaseUrl(value) {
+	try {
+		const url = new URL(value)
+		return url.protocol === 'https:' && !url.username && !url.password && url.pathname === '/' && !url.search && !url.hash &&
+			/^[a-z0-9-]+\.(?:firebaseio\.com|firebasedatabase\.app)$/.test(url.hostname)
+	} catch (_) { return false }
+}
+
+function startRealtimeDatabaseListener(databaseUrl) {
+	if (!isValidRealtimeDatabaseUrl(databaseUrl)) {
+		$('cloudDataStatus').textContent = 'A URL do Realtime Database está ausente ou inválida.'
+		return
+	}
+	if (!window.firebase?.database) {
+		$('cloudDataStatus').textContent = 'O SDK do Realtime Database não carregou.'
+		return
+	}
+	if (realtimeDatabaseRef && realtimeDatabaseRef.toString().startsWith(databaseUrl)) return
+	if (realtimeDatabaseRef && realtimeDatabaseListener) realtimeDatabaseRef.off('value', realtimeDatabaseListener)
+	const appName = `BettaFeederRTDB_${new URL(databaseUrl).hostname.replace(/[^a-zA-Z0-9]/g, '_')}`
+	let databaseApp = firebase.apps.find(app => app.name === appName)
+	if (!databaseApp) {
+		const config = { ...window.BETTA_FIREBASE_CONFIG, databaseURL: databaseUrl }
+		databaseApp = firebase.initializeApp(config, appName)
+	}
+	const reference = firebase.database(databaseApp).ref('devices/bettafeeder')
+	const listener = snapshot => {
+		const deviceData = snapshot.val()
+		if (!deviceData) {
+			$('cloudDataStatus').textContent = 'Ainda não há dados do alimentador no Realtime Database.'
+			return
+		}
+		applyRealtimeDatabaseData(deviceData)
+	}
+	realtimeDatabaseRef = reference
+	realtimeDatabaseListener = listener
+	realtimeDatabaseLastError = ''
+	reference.on('value', listener, error => {
+		const permissionDenied = error?.code === 'PERMISSION_DENIED'
+		$('cloudDataStatus').textContent = permissionDenied
+			? 'Sem permissão de leitura no Realtime Database. Revise as regras do banco.'
+			: `Falha ao ler o Realtime Database: ${error?.message || error}`
+		if (realtimeDatabaseLastError !== error?.code) log($('cloudDataStatus').textContent, 'error')
+		realtimeDatabaseLastError = error?.code || 'unknown'
+	})
+}
+
+function applyRealtimeDatabaseData(data) {
+	const status = data.status || {}
+	if (status.wifi) $('wifiStatus').textContent = status.wifi === 'conectado' ? 'Conectado' : 'Desconectado'
+	if (status.ssid !== undefined) $('ssid').value = status.ssid || ''
+	if (status.feed1) $('feed1').value = status.feed1
+	if (status.feed2) $('feed2').value = status.feed2
+	feedTimesReceived = Boolean(status.feed1 && status.feed2)
+	const remaining = Number(status.portionsRemaining)
+	if (Number.isFinite(remaining)) $('portionsStatus').textContent = String(remaining)
+	if (status.temperatureC === null || status.temperatureC === undefined) {
+		$('temperatureStatus').textContent = 'Indisponível'
+		$('temperatureStatus').classList.remove('temperature-low')
+	} else {
+		const temperature = Number(status.temperatureC)
+		$('temperatureStatus').textContent = `${temperature.toFixed(1).replace('.', ',')} °C`
+		$('temperatureStatus').classList.toggle('temperature-low', temperature < 24 || temperature > 28)
+	}
+	const updatedAt = Number(status.updatedAt)
+	if (Number.isFinite(updatedAt) && updatedAt > 0) {
+		const when = new Date(updatedAt * 1000)
+		$('clockStatus').textContent = when.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'medium' })
+	}
+	const refLabel = status.referenceValid ? 'Confirmada' : 'Precisa ser definida'
+	const batchLabel = status.batchState === 'aguardando_recarga' ? 'Aguardando recarga' : 'Pronto'
+	$('batchStatus').textContent = `Referência: ${refLabel} · Lote: ${batchLabel}`
+	feedReferenceReady = Boolean(status.referenceValid)
+	motorTestActive = Boolean(status.motorTest)
+	updateFeedButtonAvailability()
+	updateMotorTestControls()
+	if (Array.isArray(data.feedHistory)) {
+		feedHistoryEpochs = data.feedHistory.filter(record => record && Number.isFinite(Number(record.timestamp)))
+			.map(record => ({ epoch: Number(record.timestamp), success: Boolean(record.success), portion: Number(record.portion) || 0, reason: String(record.reason || '') }))
+		renderFeedHistory()
+	}
+	if (Array.isArray(data.logs)) {
+		for (const record of data.logs) {
+			if (!record || typeof record.message !== 'string') continue
+			const key = `${record.timestamp || 0}:${record.message}`
+			if (displayedRealtimeLogKeys.has(key)) continue
+			displayedRealtimeLogKeys.add(key)
+			if (displayedRealtimeLogKeys.size > 256) displayedRealtimeLogKeys.delete(displayedRealtimeLogKeys.values().next().value)
+			const epoch = Number(record.timestamp)
+			log(record.message, /teste do motor|teste motor/i.test(record.message) ? 'test' : 'info', epoch ? new Date(epoch * 1000) : null)
+		}
+	}
+	$('cloudDataStatus').textContent = Number.isFinite(updatedAt) && updatedAt > 0
+		? `Dados do Firebase atualizados em ${new Date(updatedAt * 1000).toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' })}.`
+		: 'Dados recebidos do Firebase.'
 }
 
 async function enablePushNotifications() {
@@ -1186,7 +1365,7 @@ $('clearFcmDevicesButton').addEventListener('click', () => guarded(async () => {
 	try {
 		const response = await sendCommandAndWait(
 			'FCM_CLEAR',
-			message => message === 'OK: dispositivos FCM removidos' || message.startsWith('ERRO:'),
+			message => message === 'OK: Dispositivos FCM removidos' || message.startsWith('ERRO:'),
 			BLE_COMMAND_TIMEOUT_MS
 		)
 		if (response.startsWith('ERRO:')) throw new Error(response)
@@ -1232,7 +1411,7 @@ async function removePairedFcmDevice(tokenOverride = '') {
 	}
 	const removeAck = await sendCommandAndWait(
 		'FCM_REMOVE',
-		message => message === 'OK: dispositivo FCM removido' || message.startsWith('ERRO:')
+		message => message === 'OK: Dispositivo FCM removido' || message.startsWith('ERRO:')
 	)
 	if (removeAck.startsWith('ERRO:')) throw new Error(removeAck)
 	if (currentFcmToken === token) currentFcmToken = ''
@@ -1263,14 +1442,14 @@ function pairFcmToken() {
 		}
 		const saveAck = await sendCommandAndWait(
 			'FCM_SAVE',
-			message => message === 'OK: destino FCM salvo' || message.startsWith('ERRO:'),
+			message => message === 'OK: Destino FCM salvo' || message.startsWith('ERRO:'),
 			BLE_COMMAND_TIMEOUT_MS
 		)
 		if (saveAck.startsWith('ERRO:')) throw new Error(saveAck)
 		updatePushControl()
 		$('pushState').textContent = 'Destino enviado ao ESP32. Use Notificação de teste.'
 		await new Promise(resolve => setTimeout(resolve, 250))
-		await sendCommand('STATUS')
+		await refreshDeviceStatus()
 	})()
 	fcmPairPromise.then(
 		() => { fcmPairPromise = null },
@@ -1346,7 +1525,7 @@ $('pushTest').addEventListener('click', () => guarded(async () => {
 	try {
 		// Atualiza o token e garante FCM_BEGIN/FCM_ADD/FCM_SAVE antes do teste.
 		await enablePushNotifications()
-		await sendCommand('FCM_TEST')
+		await sendCommandAndWait('FCM_TEST', message => message === 'OK: Teste de push enfileirado' || message.startsWith('ERRO:'))
 		$('pushState').textContent = 'Teste de push solicitado. Aguarde a notificação.'
 		toast('Notificação de teste solicitada')
 	} finally {
