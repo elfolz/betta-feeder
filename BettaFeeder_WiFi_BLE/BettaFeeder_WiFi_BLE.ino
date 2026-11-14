@@ -1884,13 +1884,19 @@ void handleCommand(String cmd) {
       return;
     }
     size_t freeEntriesBefore = prefs.freeEntries();
-    size_t projectWritten = prefs.putString("fbProject", pendingFirebaseProjectId);
-    size_t databaseWritten = prefs.putString("fbRtdb", pendingFirebaseDatabaseUrl);
-    size_t emailWritten = prefs.putString("fbEmail", pendingFirebaseClientEmail);
     size_t keySize = pendingFirebasePrivateKey.length() + 1;
-    size_t keyWritten = prefs.putBytes("fbKeyBin", pendingFirebasePrivateKey.c_str(), keySize);
+    size_t previousKeySize = prefs.getBytesLength("fbKeyBin");
+    char* previousKey = previousKeySize > 0 ? (char*)malloc(previousKeySize) : nullptr;
+    bool previousKeyRead = previousKeySize == 0 || (previousKey &&
+      prefs.getBytes("fbKeyBin", previousKey, previousKeySize) == previousKeySize);
+    size_t keyWritten = 0;
+    if (previousKeyRead) {
+      // NVS blobs are copy-on-write. Replacing a large blob can fail when the
+      // old and new copies cannot coexist, even when freeEntries() looks healthy.
+      prefs.remove("fbKeyBin");
+      keyWritten = prefs.putBytes("fbKeyBin", pendingFirebasePrivateKey.c_str(), keySize);
+    }
     String savedProject = prefs.getString("fbProject", "");
-    String savedEmail = prefs.getString("fbEmail", "");
     size_t savedKeySize = prefs.getBytesLength("fbKeyBin");
     char* savedKeyBuffer = savedKeySize == keySize ? (char*)malloc(savedKeySize) : nullptr;
     bool savedKeyMatches = false;
@@ -1899,13 +1905,28 @@ void handleCommand(String cmd) {
         memcmp(savedKeyBuffer, pendingFirebasePrivateKey.c_str(), keySize) == 0;
       free(savedKeyBuffer);
     }
-    if (!projectWritten || !emailWritten || !keyWritten ||
-        savedProject != pendingFirebaseProjectId || databaseWritten != pendingFirebaseDatabaseUrl.length() ||
+    if (!keyWritten || !savedKeyMatches) {
+      // Restore the prior credential if the replacement did not persist.
+      if (previousKeyRead && previousKeySize > 0) prefs.putBytes("fbKeyBin", previousKey, previousKeySize);
+      free(previousKey);
+      notifyBLE(String("ERRO: NVS Firebase; gravado=0,0,") + keyWritten +
+                "; lido=" + savedProject.length() + "," + prefs.getString("fbEmail", "").length() + "," + savedKeySize +
+                "; esperado=" + pendingFirebaseProjectId.length() + "," + pendingFirebaseClientEmail.length() +
+                "," + keySize + "; livres=" + freeEntriesBefore);
+      return;
+    }
+    free(previousKey);
+    size_t projectWritten = prefs.putString("fbProject", pendingFirebaseProjectId);
+    size_t databaseWritten = prefs.putString("fbRtdb", pendingFirebaseDatabaseUrl);
+    size_t emailWritten = prefs.putString("fbEmail", pendingFirebaseClientEmail);
+    savedProject = prefs.getString("fbProject", "");
+    String savedEmail = prefs.getString("fbEmail", "");
+    if (!projectWritten || !emailWritten || savedProject != pendingFirebaseProjectId ||
+        databaseWritten != pendingFirebaseDatabaseUrl.length() ||
         prefs.getString("fbRtdb", "") != pendingFirebaseDatabaseUrl ||
-        savedEmail != pendingFirebaseClientEmail ||
-        !savedKeyMatches) {
+        savedEmail != pendingFirebaseClientEmail) {
       notifyBLE(String("ERRO: NVS Firebase; gravado=") + projectWritten + "," + emailWritten + "," + keyWritten +
-                "; lido=" + savedProject.length() + "," + savedEmail.length() + "," + savedKeySize +
+                "; lido=" + prefs.getString("fbProject", "").length() + "," + savedEmail.length() + "," + savedKeySize +
                 "; esperado=" + pendingFirebaseProjectId.length() + "," + pendingFirebaseClientEmail.length() +
                 "," + keySize + "; livres=" + freeEntriesBefore);
       return;
