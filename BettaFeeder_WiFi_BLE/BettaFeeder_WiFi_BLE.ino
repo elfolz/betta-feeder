@@ -231,7 +231,7 @@ void appendFeedHistory(bool success, const char* reason, uint8_t portion = 0, ui
   record.epoch = epoch;
   record.success = success ? 1 : 0;
   record.portion = portion;
-  String(reason).substring(0, sizeof(record.reason) - 1).toCharArray(record.reason, sizeof(record.reason));
+  strlcpy(record.reason, reason ? reason : "", sizeof(record.reason));
   feedHistory[feedHistoryNext] = record;
   prefs.putBytes(feedHistoryKey(feedHistoryNext).c_str(), &record, sizeof(record));
   feedHistoryNext = (feedHistoryNext + 1) % FEED_HISTORY_CAPACITY;
@@ -279,9 +279,13 @@ void saveDeviceLog(const String& message) {
   DeviceLogRecord record{};
   time_t now = time(nullptr);
   if (now >= 1735689600) record.epoch = static_cast<uint32_t>(now);
-  String safe = message;
-  safe.replace("\n", " "); safe.replace("\r", " ");
-  safe.substring(0, sizeof(record.message) - 1).toCharArray(record.message, sizeof(record.message));
+  size_t copied = 0;
+  while (copied < message.length() && copied < sizeof(record.message) - 1) {
+    const char c = message[copied];
+    record.message[copied] = (c == '\n' || c == '\r') ? ' ' : c;
+    copied++;
+  }
+  record.message[copied] = '\0';
   prefs.putBytes(deviceLogKey(deviceLogNext).c_str(), &record, sizeof(record));
   deviceLogNext = (deviceLogNext + 1) % DEVICE_LOG_CAPACITY;
   if (deviceLogCount < DEVICE_LOG_CAPACITY) deviceLogCount++;
@@ -718,10 +722,8 @@ bool isTlsMemoryError(WiFiClientSecure& secure) {
 }
 void configureTlsClient(WiFiClientSecure& secure) {
   // O bundle de CAs usa memoria adicional durante o handshake. Com BLE
-  // ativo, o ESP32 pode ficar com pouca heap e falhar antes de abrir o
-  // socket (BIGNUM/Memory allocation failed). Nesse caso, evita manter um
-  // segundo cliente TLS de fallback vivo e usa TLS sem validacao de CA.
-  // Em heap normal, a cadeia de certificados continua sendo validada.
+  // ativo, o ESP32 pode ficar com pouca heap; nesse caso, libera o handshake
+  // sem validacao de CA para manter o envio disponivel.
   if (ESP.getFreeHeap() < 70000) {
     notifyPushLog(String("TLS: heap baixa (") + ESP.getFreeHeap() + "); sem validacao de CA");
     secure.setInsecure();
@@ -746,7 +748,7 @@ String oauthToken() {
   }
   bool tlsLowMemory = ESP.getFreeHeap() < 70000;
   WiFiClientSecure secure;
-  configureTlsClient(secure); // mantém validação do certificado; sem setInsecure()
+  configureTlsClient(secure);
   HTTPClient http;
   http.setTimeout(12000);
   if (!http.begin(secure, "https://oauth2.googleapis.com/token")) {
@@ -972,18 +974,19 @@ bool deliverPush(const String& title, const String& body) {
   if (!hasFcmDevices()) return false;
   bool allActiveDevicesDelivered = true;
   uint8_t count = fcmTargetCount;
-  String invalidTokens[FCM_DEVICE_CAPACITY];
-  uint8_t invalidCount = 0;
+  bool invalidTargets[FCM_DEVICE_CAPACITY] = {};
   for (uint8_t i = 0; i < count; i++) {
     notifyPushLog(String("enviando para dispositivo ") + (i + 1) + "/" + count);
     bool tokenInvalid = false;
     const String targetToken = fcmTargetTokens[i];
     bool sent = deliverPushToToken(title, body, targetToken, tokenInvalid);
     if (!sent && !tokenInvalid) allActiveDevicesDelivered = false;
-    if (tokenInvalid) invalidTokens[invalidCount++] = targetToken;
+    if (tokenInvalid) invalidTargets[i] = true;
   }
-  for (uint8_t i = 0; i < invalidCount; i++) {
-    if (removeFcmToken(invalidTokens[i])) {
+  for (int i = count - 1; i >= 0; i--) {
+    if (!invalidTargets[i]) continue;
+    const String invalidToken = fcmTargetTokens[i];
+    if (removeFcmToken(invalidToken)) {
       notifyPushLog(String("token FCM expirado removido; restantes=") + fcmTargetCount);
     } else {
       notifyPushLog("falha ao remover token FCM expirado do NVS");
@@ -1009,19 +1012,20 @@ void processFcmMaintenance() {
 
   notifyPushLog("validacao periodica dos destinos FCM iniciada");
   uint8_t count = fcmTargetCount;
-  String invalidTokens[FCM_DEVICE_CAPACITY];
-  uint8_t invalidCount = 0;
+  bool invalidTargets[FCM_DEVICE_CAPACITY] = {};
   bool retryNeeded = false;
   for (uint8_t i = 0; i < count; i++) {
     bool tokenInvalid = false;
     const String targetToken = fcmTargetTokens[i];
     bool valid = deliverPushToToken("BettaFeeder", "Validacao de destino.",
                                     targetToken, tokenInvalid, true);
-    if (tokenInvalid) invalidTokens[invalidCount++] = targetToken;
+    if (tokenInvalid) invalidTargets[i] = true;
     else if (!valid) retryNeeded = true;
   }
-  for (uint8_t i = 0; i < invalidCount; i++) {
-    if (removeFcmToken(invalidTokens[i])) {
+  for (int i = count - 1; i >= 0; i--) {
+    if (!invalidTargets[i]) continue;
+    const String invalidToken = fcmTargetTokens[i];
+    if (removeFcmToken(invalidToken)) {
       notifyPushLog(String("destino FCM sem registro removido; restantes=") + fcmTargetCount);
     } else {
       notifyPushLog("falha ao remover destino FCM sem registro do NVS");
@@ -1055,7 +1059,7 @@ void clearQueuedPushesLocked() {
 }
 
 void queuePush(const String& event, const String& text) {
-  if (!pushDeliveryConfigured()) return;
+  if (!pushQueueMutex || !pushDeliveryConfigured()) return;
   bool updated = false;
   bool dropped = false;
   xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
@@ -1088,6 +1092,7 @@ void queuePush(const String& event, const String& text) {
 }
 
 bool hasQueuedPush(const String& event) {
+  if (!pushQueueMutex) return false;
   bool found = false;
   xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
   if (pendingPushEvent == event) found = true;
@@ -1099,6 +1104,7 @@ bool hasQueuedPush(const String& event) {
 }
 
 bool hasPendingPush() {
+  if (!pushQueueMutex) return false;
   xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
   const bool pending = !pendingPushEvent.isEmpty();
   xSemaphoreGive(pushQueueMutex);
@@ -1106,6 +1112,7 @@ bool hasPendingPush() {
 }
 
 void cancelQueuedPush(const String& event) {
+  if (!pushQueueMutex) return;
   xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
   if (pendingPushEvent == event) {
     pendingPushEvent = "";
@@ -1125,12 +1132,14 @@ void cancelQueuedPush(const String& event) {
 }
 
 void clearQueuedPushes() {
+  if (!pushQueueMutex) return;
   xSemaphoreTake(pushQueueMutex, portMAX_DELAY);
   clearQueuedPushesLocked();
   xSemaphoreGive(pushQueueMutex);
 }
 
 void processPush() {
+  if (!pushQueueMutex) return;
   String deliveredEvent;
   String deliveredText;
   if (!pushDeliveryConfigured()) {
@@ -1509,6 +1518,42 @@ void sendStatus() {
   notifyBLE(s);
 }
 
+void updateTemperatureAlert(float measured, bool high, uint32_t nowEpoch) {
+  bool& active = high ? highTemperatureAlertActive : lowTemperatureAlertActive;
+  uint32_t& lastAlertEpoch = high ? lastHighTemperatureAlertEpoch : lastLowTemperatureAlertEpoch;
+  const float limit = high ? HIGH_TEMPERATURE_LIMIT_C : LOW_TEMPERATURE_LIMIT_C;
+  const char* activeKey = high ? "tempHighOn" : "tempLowOn";
+  const char* epochKey = high ? "tempHighAt" : "tempLowAt";
+  const char* event = high ? "TEMPERATURA_ALTA" : "TEMPERATURA_BAIXA";
+  const bool thresholdExceeded = high ? measured > limit : measured < limit;
+  const bool returnedToSafeRange = high
+    ? measured <= limit - 0.5f
+    : measured >= limit + 0.5f;
+
+  if (thresholdExceeded &&
+      (!active || (nowEpoch && lastAlertEpoch &&
+        static_cast<uint32_t>(nowEpoch - lastAlertEpoch) >= TEMPERATURE_ALERT_INTERVAL_SECONDS))) {
+    active = true;
+    lastAlertEpoch = nowEpoch;
+    prefs.putBool(activeKey, true);
+    prefs.putUInt(epochKey, lastAlertEpoch);
+    String alertText = String("Temperatura da água ") + (high ? "alta: " : "baixa: ") +
+      String(measured, 1) + " °C. Limite: " + String(static_cast<int>(limit)) + " °C";
+    notifyBLE(String("ALERTA_TEMPERATURA: ") + alertText);
+    queuePush(event, alertText);
+  } else if (returnedToSafeRange) {
+    active = false;
+    lastAlertEpoch = 0;
+    prefs.putBool(activeKey, false);
+    prefs.putUInt(epochKey, 0);
+    cancelQueuedPush(event);
+  } else if (active && !lastAlertEpoch && nowEpoch) {
+    // Start the persistent repeat interval once NTP becomes available.
+    lastAlertEpoch = nowEpoch;
+    prefs.putUInt(epochKey, lastAlertEpoch);
+  }
+}
+
 void processTemperature() {
   const unsigned long now = millis();
   if (temperatureConversionPending) {
@@ -1526,48 +1571,8 @@ void processTemperature() {
     const bool hasValidClock = clockIsValid() && epochNow >= 1735689600;
     const uint32_t nowEpoch = hasValidClock ? static_cast<uint32_t>(epochNow) : 0;
 
-    if (measured < LOW_TEMPERATURE_LIMIT_C &&
-        (!lowTemperatureAlertActive || (nowEpoch && lastLowTemperatureAlertEpoch &&
-          static_cast<uint32_t>(nowEpoch - lastLowTemperatureAlertEpoch) >= TEMPERATURE_ALERT_INTERVAL_SECONDS))) {
-      lowTemperatureAlertActive = true;
-      lastLowTemperatureAlertEpoch = nowEpoch;
-      prefs.putBool("tempLowOn", true);
-      prefs.putUInt("tempLowAt", lastLowTemperatureAlertEpoch);
-      String alertText = "Temperatura da água baixa: " + String(measured, 1) + " °C. Limite: 24 °C";
-      notifyBLE(String("ALERTA_TEMPERATURA: ") + alertText);
-      queuePush("TEMPERATURA_BAIXA", alertText);
-    } else if (measured >= LOW_TEMPERATURE_LIMIT_C + 0.5f) {
-      lowTemperatureAlertActive = false;
-      lastLowTemperatureAlertEpoch = 0;
-      prefs.putBool("tempLowOn", false);
-      prefs.putUInt("tempLowAt", 0);
-      cancelQueuedPush("TEMPERATURA_BAIXA");
-    } else if (lowTemperatureAlertActive && !lastLowTemperatureAlertEpoch && nowEpoch) {
-      // Start the persistent 30-minute interval once NTP becomes available.
-      lastLowTemperatureAlertEpoch = nowEpoch;
-      prefs.putUInt("tempLowAt", lastLowTemperatureAlertEpoch);
-    }
-
-    if (measured > HIGH_TEMPERATURE_LIMIT_C &&
-        (!highTemperatureAlertActive || (nowEpoch && lastHighTemperatureAlertEpoch &&
-          static_cast<uint32_t>(nowEpoch - lastHighTemperatureAlertEpoch) >= TEMPERATURE_ALERT_INTERVAL_SECONDS))) {
-      highTemperatureAlertActive = true;
-      lastHighTemperatureAlertEpoch = nowEpoch;
-      prefs.putBool("tempHighOn", true);
-      prefs.putUInt("tempHighAt", lastHighTemperatureAlertEpoch);
-      String alertText = "Temperatura da água alta: " + String(measured, 1) + " °C. Limite: 28 °C";
-      notifyBLE(String("ALERTA_TEMPERATURA: ") + alertText);
-      queuePush("TEMPERATURA_ALTA", alertText);
-    } else if (measured <= HIGH_TEMPERATURE_LIMIT_C - 0.5f) {
-      highTemperatureAlertActive = false;
-      lastHighTemperatureAlertEpoch = 0;
-      prefs.putBool("tempHighOn", false);
-      prefs.putUInt("tempHighAt", 0);
-      cancelQueuedPush("TEMPERATURA_ALTA");
-    } else if (highTemperatureAlertActive && !lastHighTemperatureAlertEpoch && nowEpoch) {
-      lastHighTemperatureAlertEpoch = nowEpoch;
-      prefs.putUInt("tempHighAt", lastHighTemperatureAlertEpoch);
-    }
+    updateTemperatureAlert(measured, false, nowEpoch);
+    updateTemperatureAlert(measured, true, nowEpoch);
   }
 
   if (!temperatureConversionPending &&
@@ -2135,6 +2140,7 @@ void startBLE() {
 void setup() {
   Serial.begin(115200);
   pushQueueMutex = xSemaphoreCreateMutex();
+  if (!pushQueueMutex) Serial.println("Push queue indisponivel: sem memoria para criar o mutex");
 
   // O projeto usa somente BLE. Liberar a memoria reservada ao Bluetooth
   // Classic aumenta a heap disponivel para o handshake TLS do FCM/OAuth.

@@ -7,8 +7,10 @@ const BLE = {
 
 const $ = (id) => document.getElementById(id)
 const encoder = new TextEncoder()
-const decoder = new TextDecoder()
+const bleDecoder = new TextDecoder()
+const serialDecoder = new TextDecoder()
 const BLE_COMMAND_TIMEOUT_MS = 15000
+const MAX_PROTOCOL_MESSAGE_LENGTH = 8192
 
 const firmwareFieldIds = [
 	'ssid', 'feed1', 'feed2', 'firebaseProjectId', 'firebaseDatabaseUrl', 'firebaseClientEmail',
@@ -38,8 +40,10 @@ let realtimeDatabaseListener = null
 let realtimeDatabaseLastError = ''
 const displayedRealtimeLogKeys = new Set()
 let commandWriteQueue = Promise.resolve()
+let commandResponseQueue = Promise.resolve()
 let rxFragments = ''
 let statusRefreshTimer = null
+let statusRequestInFlight = false
 let feedReferenceReady = false
 let feedTimesReceived = false
 let reloadWaitingForRefill = false
@@ -176,8 +180,9 @@ function alertIfFirebaseSetupIncomplete(deviceFirebaseState) {
 $('firebaseSetupDismiss').addEventListener('click', () => $('firebaseSetupDialog').close())
 
 function waitForBleResponse(predicate, timeoutMs = 5000, commandLabel = '') {
-	return new Promise((resolve, reject) => {
-		const waiter = { predicate, resolve, reject, timer: null }
+	let waiter
+	const promise = new Promise((resolve, reject) => {
+		waiter = { predicate, resolve, reject, timer: null }
 		waiter.timer = setTimeout(() => {
 			const index = bleResponseWaiters.indexOf(waiter)
 			if (index >= 0) bleResponseWaiters.splice(index, 1)
@@ -185,6 +190,14 @@ function waitForBleResponse(predicate, timeoutMs = 5000, commandLabel = '') {
 		}, timeoutMs)
 		bleResponseWaiters.push(waiter)
 	})
+	return {
+		promise,
+		cancel() {
+			const index = bleResponseWaiters.indexOf(waiter)
+			if (index >= 0) bleResponseWaiters.splice(index, 1)
+			clearTimeout(waiter.timer)
+		}
+	}
 }
 
 function resolveBleResponse(message) {
@@ -198,13 +211,40 @@ function resolveBleResponse(message) {
 	}
 }
 
+function rejectPendingBleResponses(reason) {
+	const waiters = bleResponseWaiters.splice(0)
+	rxFragments = ''
+	bleDecoder.decode()
+	for (const waiter of waiters) {
+		clearTimeout(waiter.timer)
+		waiter.reject(new Error(reason))
+	}
+}
+
 async function sendCommandAndWait(command, predicate, timeoutMs = 5000) {
-	const commandLabel = command.includes('=') ? command.slice(0, command.indexOf('=')) : command
-	const responsePromise = waitForBleResponse(predicate, timeoutMs, commandLabel)
-	await sendCommand(command)
-	const response = await responsePromise
-	if (response.startsWith('ERRO:')) throw new Error(`ESP32: ${response}`)
-	return response
+	const transaction = commandResponseQueue.then(async () => {
+		const commandLabel = command.includes('=') ? command.slice(0, command.indexOf('=')) : command
+		const responseWaiter = waitForBleResponse(predicate, timeoutMs, commandLabel)
+		try {
+			await sendCommand(command)
+		} catch (error) {
+			responseWaiter.cancel()
+			throw error
+		}
+		const response = await responseWaiter.promise
+		if (response.startsWith('ERRO:')) throw new Error(`ESP32: ${response}`)
+		return response
+	})
+	commandResponseQueue = transaction.catch(() => { })
+	return transaction
+}
+
+function refreshDeviceStatus() {
+	if (statusRequestInFlight) return Promise.resolve()
+	statusRequestInFlight = true
+	return sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000).catch(error => {
+		console.warn('Falha ao atualizar status:', error)
+	}).finally(() => { statusRequestInFlight = false })
 }
 
 function errorMessage(error, fallback = 'Ocorreu um erro ao conectar ao Bluetooth.') {
@@ -286,7 +326,7 @@ function setConnected(connected, name = 'BettaFeeder') {
 	clearInterval(statusRefreshTimer)
 	statusRefreshTimer = connected ? setInterval(() => {
 		if (!connectionInProgress && isConnected() && hasCommandTransport()) {
-			sendCommand('STATUS', true).catch(error => console.warn('Falha ao atualizar status:', error))
+			void refreshDeviceStatus()
 		}
 	}, 10000) : null
 }
@@ -386,7 +426,7 @@ function parseDeviceMessage(message) {
 		motorTestShots = Number(motorTestState[2])
 		if (!motorTestActive) {
 			motorTestNextEpoch = 0
-			sendCommand('STATUS', true).catch(() => {})
+			void refreshDeviceStatus()
 		}
 		updateMotorTestControls()
 		updateFeedButtonAvailability()
@@ -540,19 +580,28 @@ function parseDeviceMessage(message) {
 
 function onNotification(event) {
 	const value = event.target.value
-	const message = decoder.decode(value)
-	if (message.startsWith('+')) {
-		rxFragments += message.slice(1)
+	const prefix = value.byteLength ? value.getUint8(0) : 0
+	if (prefix === 43 || prefix === 61) {
+		const isFinalFragment = prefix === 61
+		const bytes = new Uint8Array(value.buffer, value.byteOffset + 1, value.byteLength - 1)
+		const fragment = bleDecoder.decode(bytes, { stream: true })
+		if (rxFragments.length + fragment.length > MAX_PROTOCOL_MESSAGE_LENGTH) {
+			rxFragments = ''
+			bleDecoder.decode()
+			console.warn('Mensagem BLE descartada: excedeu o limite de tamanho')
+			return
+		}
+		rxFragments += fragment
+		if (isFinalFragment) {
+			const completeMessage = rxFragments + bleDecoder.decode()
+			rxFragments = ''
+			parseDeviceMessage(completeMessage)
+		}
 		return
 	}
-	if (message.startsWith('=')) {
-		rxFragments += message.slice(1)
-		parseDeviceMessage(rxFragments)
-		rxFragments = ''
-		return
-	}
+	bleDecoder.decode()
 	rxFragments = ''
-	message.split(/\r?\n/).filter(Boolean).forEach(parseDeviceMessage)
+	bleDecoder.decode(value).split(/\r?\n/).filter(Boolean).forEach(parseDeviceMessage)
 }
 
 async function connect() {
@@ -622,7 +671,7 @@ async function connectSerial() {
 	}
 }
 
-async function attachSerialPort(port, verifyDevice = false) {
+async function attachSerialPort(port) {
 	serialPort = port
 	await serialPort.open({ baudRate: 115200 })
 	serialConnected = true
@@ -631,11 +680,7 @@ async function attachSerialPort(port, verifyDevice = false) {
 	$('serialConnectButton').querySelector('.serial-button-label').textContent = 'Desconectar USB Serial'
 	log('Serial conectada; Bluetooth permanece ativo.', 'success')
 	void readSerialLoop()
-	if (verifyDevice) {
-		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
-	} else {
-		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
-	}
+	await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
 	await sendCommandAndWait('LOGS', message => message === 'LOGS_DONE', 15000)
 	await requestFeedingHistory()
 	void syncPushAuthorization()
@@ -652,7 +697,7 @@ async function reconnectAuthorizedSerial() {
 	try {
 		for (const port of ports) {
 			try {
-				await attachSerialPort(port, true)
+				await attachSerialPort(port)
 				log('Porta USB Serial autorizada reconectada automaticamente.', 'success')
 				return
 			} catch (error) {
@@ -683,9 +728,13 @@ async function readSerialLoop() {
 				const { value, done } = await reader.read()
 				if (done) break
 				if (!value) continue
-				serialReadBuffer += decoder.decode(value, { stream: true })
+				serialReadBuffer += serialDecoder.decode(value, { stream: true })
 				const lines = serialReadBuffer.split(/\r?\n/)
 				serialReadBuffer = lines.pop() || ''
+				if (serialReadBuffer.length > MAX_PROTOCOL_MESSAGE_LENGTH) {
+					serialReadBuffer = ''
+					console.warn('Linha serial descartada: excedeu o limite de tamanho')
+				}
 				lines.filter(Boolean).forEach(parseDeviceMessage)
 			}
 		} catch (error) {
@@ -699,6 +748,7 @@ async function readSerialLoop() {
 }
 
 function onDisconnected() {
+	rejectPendingBleResponses('Conexão encerrada antes da resposta do ESP32.')
 	rxCharacteristic = null
 	txCharacteristic = null
 	server = null
@@ -709,6 +759,9 @@ function onDisconnected() {
 }
 
 function onSerialDisconnected() {
+	rejectPendingBleResponses('Conexão serial encerrada antes da resposta do ESP32.')
+	serialDecoder.decode()
+	serialReadBuffer = ''
 	serialConnected = false
 	serialWriter = null
 	serialPort = null
@@ -784,7 +837,7 @@ $('saveTimesButton').addEventListener('click', () => guarded(async () => {
 	if (first === second) throw new Error('Os horários precisam ser diferentes.')
 	await sendCommandAndWait(
 		`TIMES=${first},${second}`,
-		message => message.startsWith('OK: horarios salvos=') || message.startsWith('ERRO:')
+		message => /^OK: Horários salvos=/i.test(message) || message.startsWith('ERRO:')
 	)
 	await requestFeedingHistory()
 	toast('Horários enviados ao ESP32')
@@ -809,7 +862,7 @@ $('motorTestToggle').addEventListener('change', () => guarded(async () => {
 		motorTestNextEpoch = Number(result[3])
 		updateMotorTestControls()
 		updateFeedButtonAvailability()
-		if (!motorTestActive) sendCommand('STATUS', true).catch(error => log(`Falha ao atualizar o estado: ${error?.message || error}`, 'error'))
+		if (!motorTestActive) await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
 		toast(motorTestActive ? 'Modo teste iniciado' : 'Modo teste interrompido')
 	} catch (error) {
 		motorTestActive = !requestedActive
@@ -825,9 +878,9 @@ $('wifiForm').addEventListener('submit', event => guarded(async () => {
 	if (!ssid) throw new Error('Informe o nome da rede Wi-Fi.')
 	if (!password) throw new Error('Informe a senha do Wi-Fi.')
 	// The SSID and password are sent as two distinct BLE writes.
-	await sendCommand(`SSID=${ssid}`)
+	await sendCommandAndWait('SSID=' + ssid, message => message === 'OK: SSID salvo. Conectando ao Wi-Fi' || message.startsWith('ERRO:'))
 	await new Promise(resolve => setTimeout(resolve, 250))
-	await sendCommand(`PASS=${password}`)
+	await sendCommandAndWait('PASS=' + password, message => message === 'OK: Senha Wi-Fi salva' || message.startsWith('ERRO:'))
 	$('password').value = ''
 	toast('Dados do Wi-Fi enviados')
 }))
@@ -918,7 +971,7 @@ $('firebaseConfigForm').addEventListener('submit', event => guarded(async () => 
 			}
 			await sendCommandAndWait('PK_SAVE', message => message === 'OK: PK_SAVE' || message.startsWith('ERRO:'), BLE_COMMAND_TIMEOUT_MS)
 		}
-		await sendCommandAndWait('FB_SAVE', message => message === 'OK: credenciais Firebase salvas.' || message.startsWith('ERRO:'), BLE_COMMAND_TIMEOUT_MS)
+		await sendCommandAndWait('FB_SAVE', message => message === 'OK: Credenciais Firebase salvas' || message.startsWith('ERRO:'), BLE_COMMAND_TIMEOUT_MS)
 		firebaseConfigFieldsEdited = false
 		try { localStorage.setItem(realtimeDatabaseUrlKey, databaseUrl) } catch (_) { }
 		$('firebasePrivateKey').value = ''
@@ -940,7 +993,7 @@ $('togglePassword').addEventListener('click', () => {
 	$('togglePassword').textContent = visible ? 'Ocultar' : 'Mostrar'
 })
 
-$('statusButton').addEventListener('click', () => guarded(() => sendCommand('STATUS')))
+$('statusButton').addEventListener('click', () => guarded(() => sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)))
 $('testFeedButton').addEventListener('click', () => guarded(async () => {
 	if (!await confirmAction('Confirmar alimentação', 'Alimentar agora? O motor vai liberar uma porção imediatamente.')) return
 	const button = $('testFeedButton')
@@ -1010,7 +1063,7 @@ $('reloadButton').addEventListener('click', () => guarded(async () => {
 	try {
 		await sendCommandAndWait(
 			'RELOAD',
-			message => message === 'OK: recarga confirmada pelo PWA; alimentador pronto.' || message.startsWith('ERRO:'),
+			message => message === 'OK: Recarga confirmada pelo App. Alimentador pronto' || message.startsWith('ERRO:'),
 			15000
 		)
 		await sendCommandAndWait('STATUS', message => message.startsWith('STATUS;'), 5000)
@@ -1312,7 +1365,7 @@ $('clearFcmDevicesButton').addEventListener('click', () => guarded(async () => {
 	try {
 		const response = await sendCommandAndWait(
 			'FCM_CLEAR',
-			message => message === 'OK: dispositivos FCM removidos' || message.startsWith('ERRO:'),
+			message => message === 'OK: Dispositivos FCM removidos' || message.startsWith('ERRO:'),
 			BLE_COMMAND_TIMEOUT_MS
 		)
 		if (response.startsWith('ERRO:')) throw new Error(response)
@@ -1358,7 +1411,7 @@ async function removePairedFcmDevice(tokenOverride = '') {
 	}
 	const removeAck = await sendCommandAndWait(
 		'FCM_REMOVE',
-		message => message === 'OK: dispositivo FCM removido' || message.startsWith('ERRO:')
+		message => message === 'OK: Dispositivo FCM removido' || message.startsWith('ERRO:')
 	)
 	if (removeAck.startsWith('ERRO:')) throw new Error(removeAck)
 	if (currentFcmToken === token) currentFcmToken = ''
@@ -1389,14 +1442,14 @@ function pairFcmToken() {
 		}
 		const saveAck = await sendCommandAndWait(
 			'FCM_SAVE',
-			message => message === 'OK: destino FCM salvo' || message.startsWith('ERRO:'),
+			message => message === 'OK: Destino FCM salvo' || message.startsWith('ERRO:'),
 			BLE_COMMAND_TIMEOUT_MS
 		)
 		if (saveAck.startsWith('ERRO:')) throw new Error(saveAck)
 		updatePushControl()
 		$('pushState').textContent = 'Destino enviado ao ESP32. Use Notificação de teste.'
 		await new Promise(resolve => setTimeout(resolve, 250))
-		await sendCommand('STATUS')
+		await refreshDeviceStatus()
 	})()
 	fcmPairPromise.then(
 		() => { fcmPairPromise = null },
@@ -1472,7 +1525,7 @@ $('pushTest').addEventListener('click', () => guarded(async () => {
 	try {
 		// Atualiza o token e garante FCM_BEGIN/FCM_ADD/FCM_SAVE antes do teste.
 		await enablePushNotifications()
-		await sendCommand('FCM_TEST')
+		await sendCommandAndWait('FCM_TEST', message => message === 'OK: Teste de push enfileirado' || message.startsWith('ERRO:'))
 		$('pushState').textContent = 'Teste de push solicitado. Aguarde a notificação.'
 		toast('Notificação de teste solicitada')
 	} finally {
