@@ -388,7 +388,7 @@ function renderFeedHistory() {
 		if (record.success) {
 			item.classList.add('feed-success')
 			const testModePrefix = record.reason === 'test_mode' ? 'MODO TESTE · ' : ''
-			item.textContent = `${testModePrefix}${portion}Disponibilizada em · ${when.replace(',', '')}`
+			item.textContent = `${testModePrefix}${portion}Disponibilizada em ${when.replace(',', '')}`
 		} else {
 			item.classList.add('feed-failure')
 			item.textContent = `${portion}Não realizada: ${reasonLabels[record.reason] || 'motivo não informado'} · ${when}`
