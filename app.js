@@ -35,6 +35,7 @@ let toastTimer = null
 let connectionInProgress = false
 let firebaseConfigFieldsEdited = false
 const realtimeDatabaseUrlKey = 'bettafeeder-realtime-database-url'
+const realtimeStatusFieldIds = ['portionsStatus', 'temperatureStatus', 'clockStatus', 'wifiStatus', 'batchStatus', 'cloudDataStatus']
 let realtimeDatabaseRef = null
 let realtimeDatabaseListener = null
 let realtimeDatabaseLastError = ''
@@ -62,6 +63,10 @@ let firebaseSetupAlertShown = false
 const bleResponseWaiters = []
 const displayedFirmwareLogKeys = new Set()
 let activityLogSequence = 0
+
+function setRealtimeStatusLoading(loading) {
+	realtimeStatusFieldIds.forEach(id => $(id)?.classList.toggle('firmware-loading', loading))
+}
 
 function isConnected() {
 	return Boolean(device?.gatt?.connected || serialConnected)
@@ -1169,6 +1174,7 @@ function startRealtimeDatabaseListener(databaseUrl) {
 	}
 	if (realtimeDatabaseRef && realtimeDatabaseRef.toString().startsWith(databaseUrl)) return
 	if (realtimeDatabaseRef && realtimeDatabaseListener) realtimeDatabaseRef.off('value', realtimeDatabaseListener)
+	setRealtimeStatusLoading(true)
 	const appName = `BettaFeederRTDB_${new URL(databaseUrl).hostname.replace(/[^a-zA-Z0-9]/g, '_')}`
 	let reference
 	try {
@@ -1179,6 +1185,7 @@ function startRealtimeDatabaseListener(databaseUrl) {
 		}
 		reference = firebase.database(databaseApp).ref('devices/bettafeeder')
 	} catch (error) {
+		setRealtimeStatusLoading(false)
 		$('cloudDataStatus').textContent = `Não foi possível iniciar o Firebase: ${error?.message || error}`
 		log($('cloudDataStatus').textContent, 'error')
 		return
@@ -1186,6 +1193,7 @@ function startRealtimeDatabaseListener(databaseUrl) {
 	const listener = snapshot => {
 		const deviceData = snapshot.val()
 		if (!deviceData) {
+			setRealtimeStatusLoading(false)
 			$('cloudDataStatus').textContent = 'Ainda não há dados do alimentador no Realtime Database.'
 			return
 		}
@@ -1195,6 +1203,7 @@ function startRealtimeDatabaseListener(databaseUrl) {
 	realtimeDatabaseListener = listener
 	realtimeDatabaseLastError = ''
 	reference.on('value', listener, error => {
+		setRealtimeStatusLoading(false)
 		const permissionDenied = error?.code === 'PERMISSION_DENIED'
 		$('cloudDataStatus').textContent = permissionDenied
 			? 'Sem permissão de leitura no Realtime Database. Revise as regras do banco.'
@@ -1205,6 +1214,7 @@ function startRealtimeDatabaseListener(databaseUrl) {
 }
 
 function applyRealtimeDatabaseData(data) {
+	setRealtimeStatusLoading(false)
 	const status = data.status || {}
 	if (status.wifi) $('wifiStatus').textContent = status.wifi === 'conectado' ? 'Conectado' : 'Desconectado'
 	if (status.ssid !== undefined) $('ssid').value = status.ssid || ''
