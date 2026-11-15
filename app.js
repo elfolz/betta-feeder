@@ -1224,7 +1224,7 @@ function applyRealtimeDatabaseData(data) {
 	const updatedAt = Number(status.updatedAt)
 	if (Number.isFinite(updatedAt) && updatedAt > 0) {
 		const when = new Date(updatedAt * 1000)
-		$('clockStatus').textContent = when.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'medium' })
+		$('clockStatus').textContent = when.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'medium' })?.replace(',', '')
 	}
 	const refLabel = status.referenceValid ? 'Confirmada' : 'Precisa ser definida'
 	const batchLabel = status.batchState === 'aguardando_recarga' ? 'Aguardando recarga' : 'Pronto'
