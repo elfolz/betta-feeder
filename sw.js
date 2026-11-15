@@ -31,8 +31,7 @@ try {
 	}
 } catch (error) {
 	console.warn('SDK de push indisponível:', error)
-}
-
+}5
 const CACHE_NAME = 'bettafeeder-pwa-v94'
 const ASSETS = ['./', './index.html', './sobre.html', './styles.css', './landing-page.css', './app.js?v=74', './firebase-config.js', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/push-icon.png', './images/models/rotor.png', './images/models/base.png', './images/models/tampa.png', './images/models/presilha.png', './images/models/parafuso-presilha.png', './images/models/caixa-full-size.png', './images/models/tampa-caixa.png', './images/models/funil.png', './images/og/controle.png', './images/og/projeto.png']
 self.addEventListener('install', event => {
