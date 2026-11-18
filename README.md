@@ -45,10 +45,13 @@ Opcional:
 | ULN2003 IN3 | GPIO 18 |
 | ULN2003 IN4 | GPIO 19 |
 | DS18B20 DATA (opcional) | GPIO 4 |
+| Gate do MOSFET da fan (opcional) | GPIO 23 |
 | DS18B20 VDD | 3,3 V |
 | DS18B20 GND | GND |
 
 O motor conecta-se ao conector do driver ULN2003, e a alimentação de 5 V do motor vai ao driver. Confira a pinagem da sua placa antes de energizar. Não é necessário módulo RTC: o horário vem de NTP quando há Wi-Fi.
+
+A fan liga pelo MOSFET quando a leitura válida do DS18B20 fica acima de 27,5 °C e só desliga quando cai abaixo de 27,0 °C, evitando alternância perto do limite. Use MOSFET compatível com nível lógico de 3,3 V no gate, una o GND da fonte da fan ao GND do ESP32 e não conecte a fan diretamente ao GPIO. Se o sensor desconectar, o firmware mantém o último estado da fan; ao iniciar, ela fica desligada.
 
 ## Impressão 3D
 

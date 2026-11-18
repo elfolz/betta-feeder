@@ -63,23 +63,20 @@
 
 // ---------- Hardware ----------
 static const uint8_t MOTOR_PINS[4] = {16, 17, 18, 19}; // ULN2003 IN1..IN4
-// DS18B20 data pin; use a 4.7k pull-up between DATA and 3.3V.
-static const uint8_t DS18B20_PIN = 4;
+static const uint8_t DS18B20_PIN = 4; // DS18B20 data pin; use a 4.7k pull-up between DATA and 3.3V.
+static const uint8_t FAN_MOSFET_PIN = 23; // MOSFET gate for the aquarium fan; use a logic-level MOSFET and common GND.
+static const float FAN_ON_TEMPERATURE_C = 27.5f;
+static const float FAN_OFF_TEMPERATURE_C = 27.0f;
 static const float LOW_TEMPERATURE_LIMIT_C = 24.0f;
 static const float HIGH_TEMPERATURE_LIMIT_C = 28.0f;
 static const unsigned long TEMPERATURE_SAMPLE_MS = 2500;
 static const uint32_t TEMPERATURE_ALERT_INTERVAL_SECONDS = 30UL * 60UL;
-// CAL_STEPS and persisted calibration stay expressed in half-step equivalents
-// for compatibility. The motor is driven in two-coil full-step mode below.
-uint16_t halfStepsPerRev = 4076;
 static const bool MOTOR_FORWARD = true; // invert if mechanical rotation is opposite
 static const uint8_t POCKETS = 15;
 static const uint8_t PORTIONS_PER_LOAD = 14;
 static const uint16_t STEP_DELAY_MS = 4; // preserve the previous shaft speed after doubling step angle
 static const uint8_t JOG_FULL_STEPS = 16; // same travel as 32 previous half-steps
 static const uint16_t JOG_STEP_DELAY_MS = STEP_DELAY_MS;
-
-// Two-coil full-step sequence: both phases stay energized at every step.
 static const uint8_t FULL_STEP_SEQ[4][4] = {
   {1,1,0,0},
   {0,1,1,0},
@@ -95,6 +92,7 @@ static const char* TX_UUID      = "7f510003-1b15-4f0b-9a2e-5b8f6a100001";
 
 NimBLECharacteristic* txCharacteristic = nullptr;
 bool bleConnected = false;
+bool fanIsOn = false;
 
 portMUX_TYPE commandMux = portMUX_INITIALIZER_UNLOCKED;
 char pendingCommand[192] = {0};
@@ -108,9 +106,9 @@ Preferences prefs;
 String wifiSSID;
 String wifiPASS;
 uint16_t feedMinute[2] = {8 * 60, 20 * 60};
+uint16_t halfStepsPerRev = 4076;
 int lastFeedDate[2] = {0, 0};
 uint32_t lastFeedEpoch = 0; // hora da ultima porcao efetivamente concluida
-
 uint8_t rotorPosition = 0;     // 0 = empty safety pocket at outlet
 uint8_t portionsDispensed = 0; // 0..14
 uint32_t batchFeedEpochs[PORTIONS_PER_LOAD] = {0};
@@ -1600,6 +1598,13 @@ void processTemperature() {
 
     updateTemperatureAlert(measured, false, nowEpoch);
     updateTemperatureAlert(measured, true, nowEpoch);
+    if (!fanIsOn && measured > FAN_ON_TEMPERATURE_C) {
+      fanIsOn = true;
+      digitalWrite(FAN_MOSFET_PIN, HIGH);
+    } else if (fanIsOn && measured < FAN_OFF_TEMPERATURE_C) {
+      fanIsOn = false;
+      digitalWrite(FAN_MOSFET_PIN, LOW);
+    }
   }
 
   if (!temperatureConversionPending &&
@@ -2206,6 +2211,10 @@ void setup() {
     pinMode(MOTOR_PINS[i], OUTPUT);
     digitalWrite(MOTOR_PINS[i], LOW);
   }
+
+  pinMode(FAN_MOSFET_PIN, OUTPUT);
+  digitalWrite(FAN_MOSFET_PIN, LOW);
+  fanIsOn = false;
 
   temperatureSensor.begin();
   temperatureSensor.setResolution(10); // 187.5 ms conversion, suitable for periodic monitoring
