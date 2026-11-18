@@ -92,7 +92,6 @@ static const char* TX_UUID      = "7f510003-1b15-4f0b-9a2e-5b8f6a100001";
 
 NimBLECharacteristic* txCharacteristic = nullptr;
 bool bleConnected = false;
-bool fanIsOn = false;
 
 portMUX_TYPE commandMux = portMUX_INITIALIZER_UNLOCKED;
 char pendingCommand[192] = {0};
@@ -129,6 +128,7 @@ bool feedInProgress = false;
 bool startupScheduleChecked = false;
 bool suppressOverdueAfterReload = false;
 bool motorTestMode = false;
+bool fanIsOn = false;
 uint8_t motorTestShots = 0;
 uint32_t motorTestNextEpoch = 0;
 static const uint32_t MOTOR_TEST_INTERVALS_SECONDS[3] = {300UL, 600UL, 900UL};
