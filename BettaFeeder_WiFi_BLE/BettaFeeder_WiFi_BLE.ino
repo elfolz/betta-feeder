@@ -1567,6 +1567,9 @@ void updateTemperatureAlert(float measured, bool high, uint32_t nowEpoch) {
     prefs.putUInt(epochKey, lastAlertEpoch);
     String alertText = String("Temperatura da água ") + (high ? "alta: " : "baixa: ") +
       String(measured, 1) + " °C. Limite: " + String(static_cast<int>(limit)) + " °C";
+    if (high) {
+      alertText += String(". Fan: ") + (fanIsOn ? "ligada" : "desligada");
+    }
     notifyBLE(String("ALERTA_TEMPERATURA: ") + alertText);
     queuePush(event, alertText);
   } else if (returnedToSafeRange) {
@@ -1599,8 +1602,6 @@ void processTemperature() {
     const bool hasValidClock = clockIsValid() && epochNow >= 1735689600;
     const uint32_t nowEpoch = hasValidClock ? static_cast<uint32_t>(epochNow) : 0;
 
-    updateTemperatureAlert(measured, false, nowEpoch);
-    updateTemperatureAlert(measured, true, nowEpoch);
     if (!fanManualOverride && !fanIsOn && measured > FAN_ON_TEMPERATURE_C) {
       fanIsOn = true;
       digitalWrite(FAN_MOSFET_PIN, HIGH);
@@ -1608,6 +1609,8 @@ void processTemperature() {
       fanIsOn = false;
       digitalWrite(FAN_MOSFET_PIN, LOW);
     }
+    updateTemperatureAlert(measured, false, nowEpoch);
+    updateTemperatureAlert(measured, true, nowEpoch);
   }
 
   if (!temperatureConversionPending &&
