@@ -621,7 +621,7 @@ textarea::placeholder {
 
 .status-grid {
 	display: grid;
-	grid-template-columns: repeat(4, minmax(0, 1fr));
+	grid-template-columns: 1fr 1fr 1fr 162px 1fr;
 	gap: 1px;
 	background: var(--line);
 	border: 1px solid var(--line);
@@ -632,7 +632,10 @@ textarea::placeholder {
 .status-item {
 	background: #17191d;
 	padding: 14px;
-	min-width: 0
+	min-width: 0;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	overflow: hidden;
 }
 
 .status-item small {
@@ -661,6 +664,10 @@ textarea::placeholder {
 	grid-template-columns: repeat(2, minmax(0, 1fr));
 	gap: 10px;
 	margin-top: 14px
+}
+
+.status-panel .status-actions {
+	grid-template-columns: repeat(3, minmax(0, 1fr))
 }
 
 .motor-alignment-actions {
@@ -951,10 +958,6 @@ footer {
 	}
 
 	.time-grid {
-		grid-template-columns: 1fr
-	}
-
-	.status-actions {
 		grid-template-columns: 1fr
 	}
 

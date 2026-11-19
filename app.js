@@ -14,7 +14,7 @@ const MAX_PROTOCOL_MESSAGE_LENGTH = 8192
 
 const firmwareFieldIds = [
 	'ssid', 'feed1', 'feed2', 'firebaseProjectId', 'firebaseDatabaseUrl', 'firebaseClientEmail',
-	'wifiStatus', 'clockStatus', 'portionsStatus', 'temperatureStatus',
+	'wifiStatus', 'clockStatus', 'portionsStatus', 'temperatureStatus', 'fanStatus',
 	'batchStatus', 'pushState', 'firebaseConfigState'
 ]
 function setFirmwareFieldsLoading(loading) {
@@ -35,7 +35,7 @@ let toastTimer = null
 let connectionInProgress = false
 let firebaseConfigFieldsEdited = false
 const realtimeDatabaseUrlKey = 'bettafeeder-realtime-database-url'
-const realtimeStatusFieldIds = ['portionsStatus', 'temperatureStatus', 'clockStatus', 'wifiStatus', 'batchStatus', 'cloudDataStatus']
+const realtimeStatusFieldIds = ['portionsStatus', 'temperatureStatus', 'fanStatus', 'clockStatus', 'wifiStatus', 'batchStatus', 'cloudDataStatus']
 let realtimeDatabaseRef = null
 let realtimeDatabaseListener = null
 let realtimeDatabaseLastError = ''
@@ -80,6 +80,24 @@ function updateFeedButtonAvailability() {
 	const button = $('testFeedButton')
 	const remaining = Number($('portionsStatus').textContent)
 	button.disabled = !isConnected() || motorTestActive || !feedReferenceReady || remaining <= 0 || button.classList.contains('is-loading')
+}
+
+function updateFanControls(isOn) {
+	if (typeof isOn !== 'boolean') return
+	$('fanStatus').textContent = isOn ? 'Ligada' : 'Desligada'
+	$('fanToggleButton').textContent = isOn ? 'Desligar fan' : 'Ligar fan'
+	$('fanToggleButton').setAttribute('aria-pressed', String(isOn))
+	$('fanToggleButton').disabled = !hasCommandTransport() || $('fanToggleButton').classList.contains('is-loading')
+}
+
+function formatClockDisplay(date, timeZone) {
+	const parts = new Intl.DateTimeFormat('pt-BR', {
+		timeZone,
+		day: '2-digit', month: '2-digit', year: '2-digit',
+		hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+	}).formatToParts(date)
+	const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]))
+	return `${values.day}/${values.month}/${values.year} ${values.hour}:${values.minute}:${values.second}`
 }
 
 function updateMotorTestControls() {
@@ -308,6 +326,7 @@ function setConnected(connected, name = 'BettaFeeder') {
 	$('password').disabled = !connected
 	$('togglePassword').disabled = !connected
 	$('pushTest').disabled = !connected
+	updateFanControls($('fanToggleButton').getAttribute('aria-pressed') === 'true')
 	$('firebaseProjectId').disabled = !connected
 	$('firebaseDatabaseUrl').disabled = !connected
 	$('firebaseClientEmail').disabled = !connected
@@ -512,6 +531,7 @@ function parseDeviceMessage(message) {
 		return i < 0 ? [part, ''] : [part.slice(0, i), part.slice(i + 1)]
 	}))
 	const motorTestMatch = fields.motor_test?.match(/^(ON|OFF),(\d+),(\d+)$/)
+	if (fields.fan === 'ON' || fields.fan === 'OFF') updateFanControls(fields.fan === 'ON')
 	motorTestSupported = Boolean(motorTestMatch)
 	if (motorTestMatch) {
 		motorTestActive = motorTestMatch[1] === 'ON'
@@ -529,7 +549,7 @@ function parseDeviceMessage(message) {
 		? `${timeMatch[1]}:${(timeMatch[2] || '00').padStart(2, '0')}`
 		: (fields.hora === 'nao_sincronizada' ? 'Não sincronizado' : fields.hora)
 	$('clockStatus').textContent = arduinoTime && arduinoDate
-		? `${arduinoTime} ${arduinoDate}`
+		? `${arduinoDate} ${arduinoTime}`
 		: (arduinoTime || '—')
 	const batchMatch = fields.porcoes_lote?.match(/^(\d+)\/14$/)
 	const dispensed = batchMatch ? Number(batchMatch[1]) : null
@@ -831,6 +851,22 @@ $('connectButton').addEventListener('click', () => guarded(async () => {
 $('serialConnectButton').addEventListener('click', () => guarded(async () => {
 	if (serialConnected) return disconnect()
 	await connectSerial()
+}))
+
+$('fanToggleButton').addEventListener('click', () => guarded(async () => {
+	const button = $('fanToggleButton')
+	const requestedOn = button.getAttribute('aria-pressed') !== 'true'
+	button.classList.add('is-loading')
+	button.disabled = true
+	try {
+		const response = await sendCommandAndWait(`FAN=${requestedOn ? 'ON' : 'OFF'}`, message => message.startsWith('OK: FAN=') || message.startsWith('ERRO:'))
+		if (response.startsWith('ERRO:')) throw new Error(response)
+		updateFanControls(requestedOn)
+		toast(requestedOn ? 'Fan ligada' : 'Fan desligada')
+	} finally {
+		button.classList.remove('is-loading')
+		updateFanControls(requestedOn)
+	}
 }))
 
 $('saveTimesButton').addEventListener('click', () => guarded(async () => {
@@ -1216,6 +1252,7 @@ function startRealtimeDatabaseListener(databaseUrl) {
 function applyRealtimeDatabaseData(data) {
 	setRealtimeStatusLoading(false)
 	const status = data.status || {}
+	if (typeof status.fanIsOn === 'boolean') updateFanControls(status.fanIsOn)
 	if (status.wifi) $('wifiStatus').textContent = status.wifi === 'conectado' ? 'Conectado' : 'Desconectado'
 	if (status.ssid !== undefined) $('ssid').value = status.ssid || ''
 	if (status.feed1) $('feed1').value = status.feed1
@@ -1234,7 +1271,7 @@ function applyRealtimeDatabaseData(data) {
 	const updatedAt = Number(status.updatedAt)
 	if (Number.isFinite(updatedAt) && updatedAt > 0) {
 		const when = new Date(updatedAt * 1000)
-		$('clockStatus').textContent = when.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'medium' })?.replace(',', '')
+		$('clockStatus').textContent = formatClockDisplay(when, 'America/Sao_Paulo')
 	}
 	const refLabel = status.referenceValid ? 'Confirmada' : 'Precisa ser definida'
 	const batchLabel = status.batchState === 'aguardando_recarga' ? 'Aguardando recarga' : 'Pronto'

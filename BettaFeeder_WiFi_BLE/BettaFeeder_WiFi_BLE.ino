@@ -129,6 +129,7 @@ bool startupScheduleChecked = false;
 bool suppressOverdueAfterReload = false;
 bool motorTestMode = false;
 bool fanIsOn = false;
+bool fanManualOverride = false;
 uint8_t motorTestShots = 0;
 uint32_t motorTestNextEpoch = 0;
 static const uint32_t MOTOR_TEST_INTERVALS_SECONDS[3] = {300UL, 600UL, 900UL};
@@ -844,6 +845,7 @@ String realtimeStatusJson() {
     "\",\"feed2\":\"" + formatHHMM(feedMinute[1]) +
     "\",\"portionsRemaining\":" + String(remaining) +
     ",\"portionsDispensed\":" + String(portionsDispensed) +
+    ",\"fanIsOn\":" + String(fanIsOn ? "true" : "false") +
     ",\"batchState\":\"" + String(awaitingReload ? "aguardando_recarga" : "pronto") +
     "\",\"referenceValid\":" + String(referenceValid ? "true" : "false") +
     ",\"temperatureC\":";
@@ -1517,6 +1519,7 @@ void sendStatus() {
   } else {
     s += "nao_sincronizada";
   }
+  s += ";fan=" + String(fanIsOn ? "ON" : "OFF");
   s += ";feed1=" + formatHHMM(feedMinute[0]);
   s += ";feed2=" + formatHHMM(feedMinute[1]);
   s += ";posicao=" + String(rotorPosition) + "/15";
@@ -1598,10 +1601,10 @@ void processTemperature() {
 
     updateTemperatureAlert(measured, false, nowEpoch);
     updateTemperatureAlert(measured, true, nowEpoch);
-    if (!fanIsOn && measured > FAN_ON_TEMPERATURE_C) {
+    if (!fanManualOverride && !fanIsOn && measured > FAN_ON_TEMPERATURE_C) {
       fanIsOn = true;
       digitalWrite(FAN_MOSFET_PIN, HIGH);
-    } else if (fanIsOn && measured < FAN_OFF_TEMPERATURE_C) {
+    } else if (!fanManualOverride && fanIsOn && measured < FAN_OFF_TEMPERATURE_C) {
       fanIsOn = false;
       digitalWrite(FAN_MOSFET_PIN, LOW);
     }
@@ -1632,6 +1635,19 @@ void handleCommand(String cmd) {
   key.trim();
   value.trim();
   key.toUpperCase();
+
+  if (key == "FAN") {
+    if (!value.equalsIgnoreCase("ON") && !value.equalsIgnoreCase("OFF")) {
+      notifyBLE("ERRO: Use FAN=ON ou FAN=OFF");
+      return;
+    }
+    fanIsOn = value.equalsIgnoreCase("ON");
+    fanManualOverride = true;
+    digitalWrite(FAN_MOSFET_PIN, fanIsOn ? HIGH : LOW);
+    nextRealtimeUploadAt = 0;
+    notifyBLE(String("OK: FAN=") + (fanIsOn ? "ON" : "OFF"));
+    return;
+  }
 
   if (key == "TEST_MODE") {
     if (value.equalsIgnoreCase("ON")) {
