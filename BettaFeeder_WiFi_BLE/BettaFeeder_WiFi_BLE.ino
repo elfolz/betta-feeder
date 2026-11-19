@@ -129,7 +129,6 @@ bool startupScheduleChecked = false;
 bool suppressOverdueAfterReload = false;
 bool motorTestMode = false;
 bool fanIsOn = false;
-bool fanManualOverride = false;
 uint8_t motorTestShots = 0;
 uint32_t motorTestNextEpoch = 0;
 static const uint32_t MOTOR_TEST_INTERVALS_SECONDS[3] = {300UL, 600UL, 900UL};
@@ -1602,10 +1601,10 @@ void processTemperature() {
     const bool hasValidClock = clockIsValid() && epochNow >= 1735689600;
     const uint32_t nowEpoch = hasValidClock ? static_cast<uint32_t>(epochNow) : 0;
 
-    if (!fanManualOverride && !fanIsOn && measured > FAN_ON_TEMPERATURE_C) {
+    if (!fanIsOn && measured > FAN_ON_TEMPERATURE_C) {
       fanIsOn = true;
       digitalWrite(FAN_MOSFET_PIN, HIGH);
-    } else if (!fanManualOverride && fanIsOn && measured < FAN_OFF_TEMPERATURE_C) {
+    } else if (fanIsOn && measured < FAN_OFF_TEMPERATURE_C) {
       fanIsOn = false;
       digitalWrite(FAN_MOSFET_PIN, LOW);
     }
@@ -1645,7 +1644,6 @@ void handleCommand(String cmd) {
       return;
     }
     fanIsOn = value.equalsIgnoreCase("ON");
-    fanManualOverride = true;
     digitalWrite(FAN_MOSFET_PIN, fanIsOn ? HIGH : LOW);
     nextRealtimeUploadAt = 0;
     notifyBLE(String("OK: FAN=") + (fanIsOn ? "ON" : "OFF"));
