@@ -10,7 +10,11 @@
 	--muted: #929aa5;
 	--mint: #00ffb9;
 	--blue: #3264ff;
-	--danger: #ff5964;
+	--danger: #ff4040;
+	--semaphore-red: #ff4040;
+	--semaphore-yellow: #ffe135;
+	--semaphore-green: #3cd070;
+	--semaphore-neutral: #e7ebef;
 	--radius: 18px;
 	font-family: Manrope, system-ui, sans-serif
 }
@@ -330,11 +334,7 @@ button:disabled {
 	cursor: wait
 }
 
-.button-secondary.is-loading .connect-spinner {
-	border-color: rgba(255, 255, 255, .35);
-	border-top-color: #fff
-}
-
+.button-secondary.is-loading .connect-spinner,
 .button-ghost.is-loading .connect-spinner {
 	border-color: rgba(255, 255, 255, .35);
 	border-top-color: #fff
@@ -470,6 +470,10 @@ button.button-primary:disabled.is-loading .connect-spinner {
 	gap: 9px
 }
 
+.input-field {
+	margin-top: 17px
+}
+
 .time-field>span,
 .input-field>span {
 	font-size: 12px;
@@ -503,7 +507,6 @@ textarea {
 
 textarea {
 	min-height: 120px;
-	resize: vertical;
 	font: 12px 'DM Mono', monospace;
 	line-height: 1.5;
 	overflow-wrap: anywhere;
@@ -565,10 +568,6 @@ textarea::placeholder {
 	font-size: 12px
 }
 
-.input-field {
-	margin-top: 17px
-}
-
 .wifi-grid {
 	display: grid;
 	grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -621,7 +620,7 @@ textarea::placeholder {
 
 .status-grid {
 	display: grid;
-	grid-template-columns: 1fr 1fr 1fr 162px 1fr;
+	grid-template-columns: 1fr 1fr 1fr;
 	gap: 1px;
 	background: var(--line);
 	border: 1px solid var(--line);
@@ -647,17 +646,15 @@ textarea::placeholder {
 
 .status-item strong {
 	font: 13px 'DM Mono', monospace;
-	color: #e7ebef
-}
-
-.status-item strong {
+	color: #e7ebef;
 	overflow-wrap: anywhere;
 	white-space: nowrap;
 }
 
-.status-item strong.temperature-low {
-	color: #ff9299
-}
+.status-item strong.semaphore-red { color: var(--semaphore-red) }
+.status-item strong.semaphore-yellow { color: var(--semaphore-yellow) }
+.status-item strong.semaphore-green { color: var(--semaphore-green) }
+.status-item strong.semaphore-neutral { color: var(--semaphore-neutral) }
 
 .status-actions {
 	display: grid;
@@ -968,9 +965,7 @@ footer {
 	footer {
 		flex-direction: column
 	}
-}
 
-@media(max-width:560px) {
 	.status-grid {
 		grid-template-columns: repeat(2, minmax(0, 1fr))
 	}

@@ -83,9 +83,10 @@
 					disabled>↻</button>
 			</div>
 			<div class="status-grid">
-				<div class="status-item"><small>Porções restantes</small><strong id="portionsStatus">—</strong></div>
+				<div class="status-item"><small>Porções restantes</small><strong id="portionsStatus" class="semaphore-neutral">—</strong></div>
 				<div class="status-item"><small>Temperatura da água</small><strong id="temperatureStatus">—</strong></div>
 				<div class="status-item"><small>Fan</small><strong id="fanStatus">-</strong></div>
+				<div class="status-item"><small>pH da água</small><strong id="phStatus" class="semaphore-neutral">—</strong></div>
 				<div class="status-item"><small>Hora do ESP32</small><strong id="clockStatus">—</strong></div>
 				<div class="status-item"><small>Wi-Fi</small><strong id="wifiStatus">—</strong></div>
 			</div>
@@ -249,6 +250,7 @@
 				<li><strong>Recarga necessária</strong><span>O ESP32 envia esta notificação após a 14ª porção e volta a enviá-la a cada hora até a recarga ser confirmada pelo botão no PWA. O alimentador permanece parado nesse período.</span></li>
 				<li><strong>Temperatura da água abaixo de 24 °C</strong><span>Quando o DS18B20 consegue fazer a leitura e a água está abaixo de 24 °C, o ESP32 envia um alerta e repete a notificação a cada 30 minutos. A repetição para quando a leitura chegar a 24 °C ou mais.</span></li>
 				<li><strong>Temperatura da água acima de 28 °C</strong><span>Quando o DS18B20 consegue fazer a leitura e a água está acima de 28 °C, o ESP32 envia um alerta e repete a notificação a cada 30 minutos. A repetição para quando a leitura chegar a 28 °C ou menos.</span></li>
+				<li><strong>pH da água fora da faixa</strong><span>O PH-4502C faz uma leitura por hora. O ESP32 envia um alerta quando o pH fica abaixo de 6,5 ou acima de 7,5.</span></li>
 				<li><strong>Movimento interrompido</strong><span>Enviada ao iniciar se o ESP32 detectar que a energia foi interrompida durante o movimento. Confira o rotor e defina novamente a posição inicial.</span></li>
 				<li><strong>Horário perdido</strong><span>Enviada quando o ESP32 verifica o horário programado com mais de 30 minutos de atraso e ignora aquela alimentação.</span></li>
 				</ul>

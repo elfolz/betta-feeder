@@ -65,6 +65,13 @@
 static const uint8_t MOTOR_PINS[4] = {16, 17, 18, 19}; // ULN2003 IN1..IN4
 static const uint8_t DS18B20_PIN = 4; // DS18B20 data pin; use a 4.7k pull-up between DATA and 3.3V.
 static const uint8_t FAN_MOSFET_PIN = 23; // MOSFET gate for the aquarium fan; use a logic-level MOSFET and common GND.
+static const uint8_t PH4502C_PIN = 34; // ADC1 input-only pin; usable while Wi-Fi is active.
+static const unsigned long PH_SAMPLE_INTERVAL_MS = 60UL * 60UL * 1000UL;
+// Calibrate against buffer solutions before relying on the pH reading.
+static const float PH_NEUTRAL_VOLTAGE = 2.50f; // analog output measured at pH 7.00
+static const float PH_SLOPE_PER_VOLT = 3.50f; // measured pH change per volt
+static const float HIGH_PH_LIMIT = 7.5f;
+static const float LOW_PH_LIMIT = 6.5f;
 static const float FAN_ON_TEMPERATURE_C = 27.5f;
 static const float FAN_OFF_TEMPERATURE_C = 27.0f;
 static const float LOW_TEMPERATURE_LIMIT_C = 24.0f;
@@ -144,6 +151,12 @@ bool lowTemperatureAlertActive = false;
 uint32_t lastLowTemperatureAlertEpoch = 0;
 bool highTemperatureAlertActive = false;
 uint32_t lastHighTemperatureAlertEpoch = 0;
+float waterPh = NAN;
+unsigned long lastPhSampleAt = 0;
+bool phSamplingInProgress = false;
+unsigned long nextPhAdcSampleAt = 0;
+uint32_t phRawTotal = 0;
+uint8_t phRawSampleCount = 0;
 
 // ---------- Wi-Fi / clock ----------
 bool ntpConfigured = false;
@@ -850,6 +863,9 @@ String realtimeStatusJson() {
     ",\"temperatureC\":";
   if (waterTemperatureC != DEVICE_DISCONNECTED_C && isfinite(waterTemperatureC)) json += String(waterTemperatureC, 1);
   else json += "null";
+  json += ",\"ph\":";
+  if (isfinite(waterPh)) json += String(waterPh, 2);
+  else json += "null";
   json += ",\"clockValid\":" + String(clockIsValid() ? "true" : "false") +
     ",\"motorTest\":" + String(motorTestMode ? "true" : "false") + "}";
   return json;
@@ -1542,7 +1558,47 @@ void sendStatus() {
   } else {
     s += "indisponivel";
   }
+  s += ";ph=";
+  s += isfinite(waterPh) ? String(waterPh, 2) : "indisponivel";
   notifyBLE(s);
+}
+
+void processPh() {
+  const unsigned long now = millis();
+  if (motionInProgress || feedInProgress) return;
+  if (!phSamplingInProgress) {
+    if (lastPhSampleAt && now - lastPhSampleAt < PH_SAMPLE_INTERVAL_MS) return;
+    lastPhSampleAt = now;
+    phSamplingInProgress = true;
+    nextPhAdcSampleAt = now;
+    phRawTotal = 0;
+    phRawSampleCount = 0;
+  }
+  if ((int32_t)(now - nextPhAdcSampleAt) < 0) return;
+  phRawTotal += analogRead(PH4502C_PIN);
+  phRawSampleCount++;
+  nextPhAdcSampleAt = now + 10;
+  if (phRawSampleCount < 16) return;
+  phSamplingInProgress = false;
+  const float raw = phRawTotal / 16.0f;
+  if (raw < 20.0f || raw > 4075.0f) {
+    waterPh = NAN;
+    return;
+  }
+  const float voltage = raw * 3.3f / 4095.0f;
+  waterPh = 7.0f + (PH_NEUTRAL_VOLTAGE - voltage) * PH_SLOPE_PER_VOLT;
+  if (!isfinite(waterPh) || waterPh < 0.0f || waterPh > 14.0f) {
+    waterPh = NAN;
+    return;
+  }
+  if (waterPh < LOW_PH_LIMIT || waterPh > HIGH_PH_LIMIT) {
+    const bool high = waterPh > HIGH_PH_LIMIT;
+    const String alertText = String("pH da água ") + (high ? "alto: " : "baixo: ") +
+      String(waterPh, 2) + (high ? ". Limite máximo: 7,5." : ". Limite mínimo: 6,5.") +
+      " Verifique a água do aquário.";
+    notifyBLE(String("ALERTA_PH: ") + alertText);
+    queuePush(high ? "PH_ALTO" : "PH_BAIXO", alertText);
+  }
 }
 
 void updateTemperatureAlert(float measured, bool high, uint32_t nowEpoch) {
@@ -1585,6 +1641,9 @@ void updateTemperatureAlert(float measured, bool high, uint32_t nowEpoch) {
 }
 
 void processTemperature() {
+  // Motor motion owns the loop until the turn finishes. Defer OneWire traffic
+  // whenever a movement is active so sensor work cannot delay a motor step.
+  if (motionInProgress || feedInProgress) return;
   const unsigned long now = millis();
   if (temperatureConversionPending) {
     if (now - temperatureConversionStarted < 750) return;
@@ -2233,6 +2292,8 @@ void setup() {
   digitalWrite(FAN_MOSFET_PIN, LOW);
   fanIsOn = false;
 
+  analogReadResolution(12);
+  analogSetPinAttenuation(PH4502C_PIN, ADC_11db);
   temperatureSensor.begin();
   temperatureSensor.setResolution(10); // 187.5 ms conversion, suitable for periodic monitoring
   temperatureSensor.setWaitForConversion(false);
@@ -2313,9 +2374,12 @@ void loop() {
 
   connectWiFiIfNeeded();
   processTemperature();
+  processPh();
   processEmptyLoadReminder();
   // Never run blocking HTTPS work in loop(): it owns the time-critical motor
   // schedule. Network updates run only in the lower-priority worker task.
 
-  delay(10);
+  // Keep the scheduler responsive between work cycles; motor scheduling runs
+  // first on every pass through loop().
+  delay(1);
 }

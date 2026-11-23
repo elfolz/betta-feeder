@@ -45,13 +45,18 @@ Opcional:
 | ULN2003 IN3 | GPIO 18 |
 | ULN2003 IN4 | GPIO 19 |
 | DS18B20 DATA (opcional) | GPIO 4 |
+| PH-4502C PO (saída analógica) | GPIO 34 |
 | Gate do MOSFET da fan (opcional) | GPIO 23 |
 | DS18B20 VDD | 3,3 V |
 | DS18B20 GND | GND |
+| PH-4502C GND | GND comum |
+| PH-4502C V+ | 5 V conforme especificação do módulo |
 
 O motor conecta-se ao conector do driver ULN2003, e a alimentação de 5 V do motor vai ao driver. Confira a pinagem da sua placa antes de energizar. Não é necessário módulo RTC: o horário vem de NTP quando há Wi-Fi.
 
 A fan liga pelo MOSFET quando a leitura válida do DS18B20 fica acima de 27,5 °C e só desliga quando cai abaixo de 27,0 °C, evitando alternância perto do limite. O botão do PWA permite ligar ou desligar manualmente, mas o controle automático pela temperatura continua ativo e prevalece quando uma leitura ultrapassa esses limites. O estado atual também é publicado em `devices/bettafeeder/status/fanIsOn` no Realtime Database e mostrado no PWA ao abrir. Use MOSFET compatível com nível lógico de 3,3 V no gate, una o GND da fonte da fan ao GND do ESP32 e não conecte a fan diretamente ao GPIO. Se o sensor desconectar, o firmware mantém o último estado da fan; ao iniciar, ela fica desligada.
+
+O módulo de pH PH-4502C é lido uma vez por hora e o valor aparece no PWA com semáforo. O ESP32 envia uma notificação se o pH estiver abaixo de 6,5 ou acima de 7,5. Ligue PO a GPIO 34 (ADC1), GND ao GND comum e alimente o módulo conforme a especificação da placa. A entrada do ESP32 não pode receber mais que 3,3 V: se PO puder exceder esse valor, use divisor de tensão apropriado. A conversão do firmware usa inicialmente 2,50 V em pH 7,00 e 3,50 pH/V; calibre esses parâmetros no firmware com soluções tampão antes de confiar nas leituras. No PWA, pH < 6 e > 8 fica vermelho; 6 a < 6,5 e > 7,5 a 8 fica amarelo; 6,5 a 7,5 fica verde.
 
 ## Impressão 3D
 

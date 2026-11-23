@@ -35,7 +35,7 @@ let toastTimer = null
 let connectionInProgress = false
 let firebaseConfigFieldsEdited = false
 const realtimeDatabaseUrlKey = 'bettafeeder-realtime-database-url'
-const realtimeStatusFieldIds = ['portionsStatus', 'temperatureStatus', 'fanStatus', 'clockStatus', 'wifiStatus', 'batchStatus', 'cloudDataStatus']
+const realtimeStatusFieldIds = ['portionsStatus', 'temperatureStatus', 'phStatus', 'fanStatus', 'clockStatus', 'wifiStatus', 'batchStatus', 'cloudDataStatus']
 let realtimeDatabaseRef = null
 let realtimeDatabaseListener = null
 let realtimeDatabaseLastError = ''
@@ -440,6 +440,54 @@ async function requestFeedingHistory(showHistory = true) {
 	}
 }
 
+function setPhStatus(value) {
+	const element = $('phStatus')
+	if (value === null || value === undefined || value === '' || value === 'indisponivel' || !Number.isFinite(Number(value))) {
+		element.textContent = 'Indisponível'
+		element.className = 'semaphore-neutral'
+		return
+	}
+	const ph = Number(value)
+	element.textContent = ph.toFixed(2).replace('.', ',')
+	let color = 'semaphore-neutral'
+	if (ph < 6 || ph > 8) color = 'semaphore-red'
+	else if ((ph >= 6 && ph < 6.5) || (ph > 7.5 && ph <= 8)) color = 'semaphore-yellow'
+	else if (ph >= 6.5 && ph <= 7.5) color = 'semaphore-green'
+	element.className = color
+}
+
+function setTemperatureStatus(value) {
+	const element = $('temperatureStatus')
+	if (value === null || value === undefined || value === '' || value === 'indisponivel' || !Number.isFinite(Number(value))) {
+		element.textContent = 'Indisponível'
+		element.className = 'semaphore-neutral'
+		return
+	}
+	const temperature = Number(value)
+	element.textContent = `${temperature.toFixed(1).replace('.', ',')} °C`
+	let color = 'semaphore-neutral'
+	if (temperature < 24 || temperature > 30) color = 'semaphore-red'
+	else if ((temperature >= 24 && temperature < 26) || (temperature > 28 && temperature <= 30)) color = 'semaphore-yellow'
+	else if (temperature >= 26 && temperature <= 28) color = 'semaphore-green'
+	element.className = color
+}
+
+function setPortionsStatus(value) {
+	const element = $('portionsStatus')
+	const remaining = Number(value)
+	if (value === null || value === undefined || value === '' || !Number.isFinite(remaining)) {
+		element.textContent = '—'
+		element.className = 'semaphore-neutral'
+		return
+	}
+	element.textContent = String(remaining)
+	let color = 'semaphore-neutral'
+	if (remaining <= 2 || remaining >= 13) color = 'semaphore-red'
+	else if ((remaining > 2 && remaining <= 4) || (remaining >= 10 && remaining <= 12)) color = 'semaphore-yellow'
+	else if (remaining > 4 && remaining < 10) color = 'semaphore-green'
+	element.className = color
+}
+
 function parseDeviceMessage(message) {
 	// Push diagnostics are neither PWA activity events nor device history.
 	if (message.startsWith('PUSH:')) return
@@ -519,7 +567,7 @@ function parseDeviceMessage(message) {
 		const batchMatch = message.match(/porcoes_no_lote=(\d+)\/14/)
 		if (batchMatch) {
 			const dispensed = Number(batchMatch[1])
-			$('portionsStatus').textContent = String(Math.max(0, 14 - dispensed))
+			setPortionsStatus(Math.max(0, 14 - dispensed))
 			updateFeedButtonAvailability()
 		}
 		void requestFeedingHistory(false).catch(error => log(`Falha ao atualizar as alimentações: ${error?.message || error}`, 'error'))
@@ -555,15 +603,11 @@ function parseDeviceMessage(message) {
 	const dispensed = batchMatch ? Number(batchMatch[1]) : null
 	const waitingForReload = fields.lote === 'aguardando_recarga'
 	reloadWaitingForRefill = waitingForReload
-	$('portionsStatus').textContent = fields.porcoes_restantes ||
-		(dispensed !== null ? String(waitingForReload ? 0 : Math.max(0, 14 - dispensed)) : '—')
+	setPortionsStatus(fields.porcoes_restantes ||
+		(dispensed !== null ? (waitingForReload ? 0 : Math.max(0, 14 - dispensed)) : null))
 	const temperature = fields.temperatura
-	$('temperatureStatus').textContent = temperature && temperature !== 'indisponivel'
-		? `${temperature.replace('.', ',')} °C`
-		: 'Indisponível'
-	const measuredTemperature = temperature !== undefined && temperature !== 'indisponivel' ? Number(temperature) : null
-	$('temperatureStatus').classList.toggle('temperature-low', measuredTemperature !== null &&
-		(measuredTemperature < 24 || measuredTemperature > 28))
+	setTemperatureStatus(temperature)
+	setPhStatus(fields.ph)
 	const referenceLabels = { confirmada: 'Confirmada', verificar: 'Precisa ser definida' }
 	const batchLabels = { pronto: 'Pronto', aguardando_recarga: 'Aguardando recarga' }
 	$('batchStatus').textContent = `Referência: ${referenceLabels[fields.referencia] || '—'} · Lote: ${batchLabels[fields.lote] || '—'}`
@@ -1120,7 +1164,26 @@ $('clearLogButton').addEventListener('click', () => {
 	$('log').innerHTML = '<div class="log-empty">Os eventos de conexão e configuração aparecerão aqui.</div>'
 })
 
-if ('serviceWorker' in navigator && window.isSecureContext) {
+function isLocalDevelopmentHost() {
+	return ['localhost', '127.0.0.1', '::1', '[::1]'].includes(window.location.hostname.toLowerCase())
+}
+
+if ('serviceWorker' in navigator && window.isSecureContext && isLocalDevelopmentHost()) {
+	// Remove a prior BettaFeeder registration from local development hosts so
+	// stale cached assets cannot keep controlling the page.
+	window.addEventListener('load', () => {
+		navigator.serviceWorker.getRegistrations().then(registrations => {
+			const serviceWorkerUrl = new URL('./sw.js', document.baseURI).href
+			return Promise.all(registrations
+				.filter(registration => registration.active?.scriptURL === serviceWorkerUrl ||
+					registration.waiting?.scriptURL === serviceWorkerUrl ||
+					registration.installing?.scriptURL === serviceWorkerUrl)
+				.map(registration => registration.unregister()))
+		}).catch(error => console.warn('Falha ao remover service worker local:', error))
+	})
+}
+
+if ('serviceWorker' in navigator && window.isSecureContext && !isLocalDevelopmentHost()) {
 	window.addEventListener('load', () => {
 		let refreshing = false
 		navigator.serviceWorker.addEventListener('controllerchange', () => {
@@ -1259,15 +1322,9 @@ function applyRealtimeDatabaseData(data) {
 	if (status.feed2) $('feed2').value = status.feed2
 	feedTimesReceived = Boolean(status.feed1 && status.feed2)
 	const remaining = Number(status.portionsRemaining)
-	if (Number.isFinite(remaining)) $('portionsStatus').textContent = String(remaining)
-	if (status.temperatureC === null || status.temperatureC === undefined) {
-		$('temperatureStatus').textContent = 'Indisponível'
-		$('temperatureStatus').classList.remove('temperature-low')
-	} else {
-		const temperature = Number(status.temperatureC)
-		$('temperatureStatus').textContent = `${temperature.toFixed(1).replace('.', ',')} °C`
-		$('temperatureStatus').classList.toggle('temperature-low', temperature < 24 || temperature > 28)
-	}
+	if (Number.isFinite(remaining)) setPortionsStatus(remaining)
+	setTemperatureStatus(status.temperatureC)
+	setPhStatus(status.ph)
 	const updatedAt = Number(status.updatedAt)
 	if (Number.isFinite(updatedAt) && updatedAt > 0) {
 		const when = new Date(updatedAt * 1000)
@@ -1302,6 +1359,7 @@ function applyRealtimeDatabaseData(data) {
 }
 
 async function enablePushNotifications() {
+	if (isLocalDevelopmentHost()) throw new Error('Notificações push indisponíveis em localhost. Abra o PWA no endereço publicado.')
 	if (!firebaseWebConfigured()) throw new Error('Preencha firebase-config.js antes.')
 	if (!('serviceWorker' in navigator) || !('Notification' in window)) {
 		throw new Error('Este dispositivo não oferece Web Push.')
